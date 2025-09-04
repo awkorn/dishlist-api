@@ -8,6 +8,184 @@ datasource db {
 }
 
 model User {
-  uid   String @id
-  email String @unique
+  uid       String @id
+  email     String @unique
+  username  String? @unique
+  firstName String?
+  lastName  String?
+  bio       String?
+  avatarUrl String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  ownedDishLists    DishList[] @relation("DishListOwner")
+  collaboratedLists DishListCollaborator[]
+  followedDishLists DishListFollower[]
+  createdRecipes    Recipe[] @relation("RecipeCreator")
+  addedRecipes      DishListRecipe[] @relation("UserAddedRecipes") // Tracks when this user adds recipes to DishLists
+  
+  // User following relationships
+  followers         UserFollow[] @relation("UserFollowers")
+  following         UserFollow[] @relation("UserFollowing")
+  
+  // Notifications
+  sentNotifications     Notification[] @relation("NotificationSender")
+  receivedNotifications Notification[] @relation("NotificationReceiver")
+
+  @@map("User")
+}
+
+model DishList {
+  id          String @id @default(cuid())
+  title       String
+  description String?
+  visibility  DishListVisibility @default(PUBLIC)
+  isDefault   Boolean @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Owner relation
+  ownerId String
+  owner   User   @relation("DishListOwner", fields: [ownerId], references: [uid], onDelete: Cascade)
+
+  // Relations
+  recipes       DishListRecipe[]
+  collaborators DishListCollaborator[]
+  followers     DishListFollower[]
+
+  @@map("DishList")
+}
+
+
+model Recipe {
+  id           String @id @default(cuid())
+  title        String
+  description  String?
+  instructions String? // JSON string or text
+  ingredients  String? // JSON string for structured ingredients
+  prepTime     Int? // minutes
+  cookTime     Int? // minutes
+  servings     Int?
+  imageUrl     String?
+  originalRecipeId String? // For tracking copied recipes
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Creator relation
+  creatorId String
+  creator   User   @relation("RecipeCreator", fields: [creatorId], references: [uid], onDelete: Cascade)
+
+  // Relations
+  dishLists DishListRecipe[]
+  
+  // Self-reference for original recipe tracking
+  originalRecipe Recipe?   @relation("RecipeCopies", fields: [originalRecipeId], references: [id])
+  copies         Recipe[]  @relation("RecipeCopies")
+
+  @@map("Recipe")
+}
+
+model DishListRecipe {
+  id         String @id @default(cuid())
+  addedAt    DateTime @default(now())
+  
+  // Relations
+  dishListId String
+  dishList   DishList @relation(fields: [dishListId], references: [id], onDelete: Cascade)
+  
+  recipeId   String
+  recipe     Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  
+  // Who added this recipe to the dish list
+  addedById  String
+  addedBy    User @relation("UserAddedRecipes", fields: [addedById], references: [uid])
+
+  @@unique([dishListId, recipeId])
+  @@map("DishListRecipe")
+}
+
+
+model DishListCollaborator {
+  id        String @id @default(cuid())
+  invitedAt DateTime @default(now())
+  
+  // Relations
+  dishListId String
+  dishList   DishList @relation(fields: [dishListId], references: [id], onDelete: Cascade)
+  
+  userId     String
+  user       User @relation(fields: [userId], references: [uid], onDelete: Cascade)
+
+  @@unique([dishListId, userId])
+  @@map("DishListCollaborator")
+}
+
+
+model DishListFollower {
+  id         String @id @default(cuid())
+  followedAt DateTime @default(now())
+  
+  // Relations
+  dishListId String
+  dishList   DishList @relation(fields: [dishListId], references: [id], onDelete: Cascade)
+  
+  userId     String
+  user       User @relation(fields: [userId], references: [uid], onDelete: Cascade)
+
+  @@unique([dishListId, userId])
+  @@map("DishListFollower")
+}
+
+
+model UserFollow {
+  id         String @id @default(cuid())
+  followedAt DateTime @default(now())
+  
+  // Relations
+  followerId String
+  follower   User   @relation("UserFollowing", fields: [followerId], references: [uid], onDelete: Cascade)
+  
+  followingId String
+  following   User   @relation("UserFollowers", fields: [followingId], references: [uid], onDelete: Cascade)
+
+  @@unique([followerId, followingId])
+  @@map("UserFollow")
+}
+
+model Notification {
+  id        String @id @default(cuid())
+  type      NotificationType
+  title     String
+  message   String
+  isRead    Boolean @default(false)
+  data      String? // JSON string for additional data
+  createdAt DateTime @default(now())
+
+  // Relations
+  senderId   String?
+  sender     User?   @relation("NotificationSender", fields: [senderId], references: [uid], onDelete: SetNull)
+  
+  receiverId String
+  receiver   User   @relation("NotificationReceiver", fields: [receiverId], references: [uid], onDelete: Cascade)
+
+  @@map("Notification")
+}
+
+
+// Enums
+enum DishListVisibility {
+  PUBLIC
+  PRIVATE
+}
+
+enum NotificationType {
+  DISHLIST_INVITATION
+  DISHLIST_SHARED
+  RECIPE_ADDED
+  DISHLIST_FOLLOWED
+  COLLABORATION_ACCEPTED
+  COLLABORATION_DECLINED
+  USER_FOLLOWED
+  SYSTEM_UPDATE
 }
