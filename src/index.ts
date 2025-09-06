@@ -5,6 +5,12 @@ import usersRouter from "./routes/users";
 import "./lib/firebase";
 
 const app = express();
+
+app.use((req, res, next) => {
+  console.log(`${req.method} ${req.path} - ${res.statusCode}`);
+  next();
+});
+
 app.use(cors());
 app.use(express.json());
 
