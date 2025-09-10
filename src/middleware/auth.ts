@@ -16,18 +16,6 @@ export const authToken = async (
       return res.status(401).json({ message: "No token provided" });
     }
 
-    // Development bypass
-    if (process.env.NODE_ENV === "development" && token === "dev-mock-token") {
-      console.log("🔧 DEV MODE: Using mock authentication");
-      req.user = {
-        uid: "dev-user-123",
-        email: "dev@dishlist.com",
-        email_verified: true,
-      } as any;
-      return next();
-    }
-
-    // Normal Firebase token verification
     const decodedToken = await admin.auth().verifyIdToken(token);
     req.user = decodedToken;
     next();
