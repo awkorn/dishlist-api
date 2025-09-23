@@ -63,12 +63,13 @@ model Recipe {
   id           String @id @default(cuid())
   title        String
   description  String?
-  instructions String? // JSON string or text
-  ingredients  String? // JSON string for structured ingredients
+  instructions String[]
+  ingredients  String[] 
   prepTime     Int? // minutes
   cookTime     Int? // minutes
   servings     Int?
   imageUrl     String?
+  nutrition    Json?
   originalRecipeId String? // For tracking copied recipes
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
