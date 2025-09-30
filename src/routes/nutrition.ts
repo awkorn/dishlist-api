@@ -44,7 +44,7 @@ All values should be numbers representing grams except calories. Be as accurate 
         'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
       },
       body: JSON.stringify({
-        model: 'gpt-3.5-turbo',
+        model: 'gpt-5-mini',
         messages: [{ role: 'user', content: prompt }],
         max_tokens: 200,
         temperature: 0.1,
