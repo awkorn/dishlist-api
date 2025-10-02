@@ -372,4 +372,66 @@ router.delete("/:id/pin", authToken, async (req: AuthRequest, res) => {
   }
 });
 
+// Delete dishlist
+router.delete("/:id", authToken, async (req: AuthRequest, res) => {
+  try {
+    const dishListId = req.params.id;
+    const userId = req.user!.uid;
+
+    // Find the dishlist
+    const dishList = await prisma.dishList.findUnique({
+      where: { id: dishListId },
+    });
+
+    if (!dishList) {
+      return res.status(404).json({ error: "DishList not found" });
+    }
+
+    // Check ownership
+    if (dishList.ownerId !== userId) {
+      return res.status(403).json({ error: "Only the owner can delete this DishList" });
+    }
+
+    // Prevent deletion of default DishList
+    if (dishList.isDefault) {
+      return res.status(400).json({ error: "Cannot delete your default DishList" });
+    }
+
+    // Get all recipes that are ONLY in this DishList
+    const dishListRecipes = await prisma.dishListRecipe.findMany({
+      where: { dishListId },
+      include: {
+        recipe: {
+          include: {
+            dishLists: true,
+          },
+        },
+      },
+    });
+
+    // Delete recipes that are only in this DishList
+    const recipesToDelete = dishListRecipes
+      .filter((dr) => dr.recipe.dishLists.length === 1)
+      .map((dr) => dr.recipe.id);
+
+    if (recipesToDelete.length > 0) {
+      await prisma.recipe.deleteMany({
+        where: {
+          id: { in: recipesToDelete },
+        },
+      });
+    }
+
+    // Delete the DishList (cascade will handle DishListRecipe, collaborators, followers)
+    await prisma.dishList.delete({
+      where: { id: dishListId },
+    });
+
+    res.json({ message: "DishList deleted successfully" });
+  } catch (error) {
+    console.error("Delete dishlist error:", error);
+    res.status(500).json({ error: "Failed to delete DishList" });
+  }
+});
+
 export default router;
