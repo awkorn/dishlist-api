@@ -124,4 +124,85 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
   }
 });
 
+// Update recipe
+router.put("/:id", authToken, async (req: AuthRequest, res) => {
+  try {
+    const recipeId = req.params.id;
+    const userId = req.user!.uid;
+    const {
+      title,
+      description,
+      instructions,
+      ingredients,
+      prepTime,
+      cookTime,
+      servings,
+      imageUrl,
+      nutrition,
+    } = req.body;
+
+    // Find existing recipe
+    const existingRecipe = await prisma.recipe.findUnique({
+      where: { id: recipeId },
+    });
+
+    if (!existingRecipe) {
+      return res.status(404).json({ error: "Recipe not found" });
+    }
+
+    // Check ownership
+    if (existingRecipe.creatorId !== userId) {
+      return res.status(403).json({ error: "Only the recipe owner can edit this recipe" });
+    }
+
+    // Validation
+    if (!title?.trim()) {
+      return res.status(400).json({ error: "Title is required" });
+    }
+
+    if (!ingredients || !Array.isArray(ingredients) || ingredients.length === 0) {
+      return res.status(400).json({ error: "At least one ingredient is required" });
+    }
+
+    if (!instructions || !Array.isArray(instructions) || instructions.length === 0) {
+      return res.status(400).json({ error: "At least one instruction is required" });
+    }
+
+    // Check if ingredients changed - if so, clear nutrition
+    const ingredientsChanged = JSON.stringify(existingRecipe.ingredients) !== JSON.stringify(ingredients);
+    const nutritionData = ingredientsChanged ? null : (nutrition || existingRecipe.nutrition);
+
+    // Update recipe
+    const updatedRecipe = await prisma.recipe.update({
+      where: { id: recipeId },
+      data: {
+        title: title.trim(),
+        description: description?.trim() || null,
+        instructions: instructions.filter(inst => inst.trim()),
+        ingredients: ingredients.filter(ing => ing.trim()),
+        prepTime: prepTime || null,
+        cookTime: cookTime || null,
+        servings: servings || null,
+        imageUrl: imageUrl || null,
+        nutrition: nutritionData,
+      },
+      include: {
+        creator: {
+          select: {
+            uid: true,
+            username: true,
+            firstName: true,
+            lastName: true,
+          },
+        },
+      },
+    });
+
+    res.json({ recipe: updatedRecipe });
+  } catch (error) {
+    console.error("Update recipe error:", error);
+    res.status(500).json({ error: "Failed to update recipe" });
+  }
+});
+
 export default router;
