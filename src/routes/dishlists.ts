@@ -132,6 +132,68 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
   }
 });
 
+// Update dishlist
+router.put("/:id", authToken, async (req: AuthRequest, res) => {
+  try {
+    const dishListId = req.params.id;
+    const userId = req.user!.uid;
+    const { title, description, visibility } = req.body;
+
+    if (!title?.trim()) {
+      return res.status(400).json({ error: "Title is required" });
+    }
+
+    // Find existing dishlist
+    const existingDishList = await prisma.dishList.findUnique({
+      where: { id: dishListId },
+    });
+
+    if (!existingDishList) {
+      return res.status(404).json({ error: "DishList not found" });
+    }
+
+    // Check ownership
+    if (existingDishList.ownerId !== userId) {
+      return res
+        .status(403)
+        .json({ error: "Only the owner can edit this DishList" });
+    }
+
+    // Prevent editing default DishList title
+    if (existingDishList.isDefault && title.trim() !== existingDishList.title) {
+      return res
+        .status(400)
+        .json({ error: "Cannot change default DishList title" });
+    }
+
+    // Update
+    const updatedDishList = await prisma.dishList.update({
+      where: { id: dishListId },
+      data: {
+        title: title.trim(),
+        description: description?.trim() || null,
+        visibility: visibility || existingDishList.visibility,
+      },
+      include: {
+        _count: { select: { recipes: true } },
+        owner: {
+          select: {
+            uid: true,
+            username: true,
+            firstName: true,
+            lastName: true,
+          },
+        },
+      },
+    });
+
+    res.json({ dishList: updatedDishList });
+  } catch (error) {
+    console.error("Update dishlist error:", error);
+    res.status(500).json({ error: "Failed to update dishlist" });
+  }
+});
+
 // Get single dishlist with recipes
 router.get("/:id", authToken, async (req: AuthRequest, res) => {
   try {
@@ -389,12 +451,16 @@ router.delete("/:id", authToken, async (req: AuthRequest, res) => {
 
     // Check ownership
     if (dishList.ownerId !== userId) {
-      return res.status(403).json({ error: "Only the owner can delete this DishList" });
+      return res
+        .status(403)
+        .json({ error: "Only the owner can delete this DishList" });
     }
 
     // Prevent deletion of default DishList
     if (dishList.isDefault) {
-      return res.status(400).json({ error: "Cannot delete your default DishList" });
+      return res
+        .status(400)
+        .json({ error: "Cannot delete your default DishList" });
     }
 
     // Get all recipes that are ONLY in this DishList
