@@ -205,4 +205,23 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
   }
 });
 
+
+// Get dishlists containing this recipe
+router.get("/:id/dishlists", authToken, async (req: AuthRequest, res) => {
+  try {
+    const recipeId = req.params.id;
+    
+    const dishListRecipes = await prisma.dishListRecipe.findMany({
+      where: { recipeId },
+      select: { dishListId: true }
+    });
+
+    const dishListIds = dishListRecipes.map(dr => dr.dishListId);
+    res.json({ dishListIds });
+  } catch (error) {
+    console.error("Get recipe dishlists error:", error);
+    res.status(500).json({ error: "Failed to fetch dishlists" });
+  }
+});
+
 export default router;

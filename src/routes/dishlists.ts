@@ -500,4 +500,69 @@ router.delete("/:id", authToken, async (req: AuthRequest, res) => {
   }
 });
 
+// Add recipe to dishlist
+router.post("/:id/recipes", authToken, async (req: AuthRequest, res) => {
+  try {
+    const dishListId = req.params.id;
+    const userId = req.user!.uid;
+    const { recipeId } = req.body;
+
+    if (!recipeId) {
+      return res.status(400).json({ error: "Recipe ID is required" });
+    }
+
+    // Verify dishlist exists and user has access
+    const dishList = await prisma.dishList.findFirst({
+      where: {
+        id: dishListId,
+        OR: [
+          { ownerId: userId },
+          { collaborators: { some: { userId } } }
+        ]
+      }
+    });
+
+    if (!dishList) {
+      return res.status(403).json({ error: "Access denied or DishList not found" });
+    }
+
+    // Verify recipe exists
+    const recipe = await prisma.recipe.findUnique({
+      where: { id: recipeId }
+    });
+
+    if (!recipe) {
+      return res.status(404).json({ error: "Recipe not found" });
+    }
+
+    // Check if recipe already in dishlist
+    const existing = await prisma.dishListRecipe.findUnique({
+      where: {
+        dishListId_recipeId: {
+          dishListId,
+          recipeId
+        }
+      }
+    });
+
+    if (existing) {
+      return res.status(400).json({ error: "Recipe already in this DishList" });
+    }
+
+    // Add recipe to dishlist
+    await prisma.dishListRecipe.create({
+      data: {
+        dishListId,
+        recipeId,
+        addedById: userId
+      }
+    });
+
+    res.json({ message: "Recipe added successfully" });
+  } catch (error) {
+    console.error("Add recipe to dishlist error:", error);
+    res.status(500).json({ error: "Failed to add recipe" });
+  }
+});
+
 export default router;
