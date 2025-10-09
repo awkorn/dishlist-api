@@ -565,4 +565,42 @@ router.post("/:id/recipes", authToken, async (req: AuthRequest, res) => {
   }
 });
 
+
+// Remove recipe from dishlist
+router.delete("/:id/recipes/:recipeId", authToken, async (req: AuthRequest, res) => {
+  try {
+    const dishListId = req.params.id;
+    const recipeId = req.params.recipeId;
+    const userId = req.user!.uid;
+
+    // Verify user has access (owner or collaborator)
+    const dishList = await prisma.dishList.findFirst({
+      where: {
+        id: dishListId,
+        OR: [
+          { ownerId: userId },
+          { collaborators: { some: { userId } } }
+        ]
+      }
+    });
+
+    if (!dishList) {
+      return res.status(403).json({ error: "Access denied or DishList not found" });
+    }
+
+    // Remove the recipe from this dishlist
+    await prisma.dishListRecipe.deleteMany({
+      where: {
+        dishListId,
+        recipeId
+      }
+    });
+
+    res.json({ message: "Recipe removed from DishList successfully" });
+  } catch (error) {
+    console.error("Remove recipe from dishlist error:", error);
+    res.status(500).json({ error: "Failed to remove recipe" });
+  }
+});
+
 export default router;
