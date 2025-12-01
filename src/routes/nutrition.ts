@@ -15,7 +15,7 @@ router.post("/calculate", authToken, async (req: AuthRequest, res) => {
   try {
     const { ingredients, servings } = req.body;
 
-    if (!ingredients || !Array.isArray(ingredients) || ingredients.length === 0) {
+    if (!Array.isArray(ingredients) || ingredients.length === 0) {
       return res.status(400).json({ error: "Ingredients array is required" });
     }
 
@@ -23,10 +23,14 @@ router.post("/calculate", authToken, async (req: AuthRequest, res) => {
       return res.status(400).json({ error: "Valid servings number is required" });
     }
 
-    const prompt = `Calculate the nutritional information per serving for a recipe with ${servings} servings using these ingredients:
-${ingredients.map((ing: string, i: number) => `${i + 1}. ${ing}`).join('\n')}
+    const prompt = `
+Calculate nutritional information PER SERVING for a recipe with ${servings} servings.
 
-Please respond with ONLY a JSON object in this exact format:
+Ingredients:
+${ingredients.map((ing: string, i: number) => `${i + 1}. ${ing}`).join("\n")}
+
+Respond with ONLY valid JSON. No markdown. Format must be:
+
 {
   "calories": number,
   "protein": number,
@@ -35,35 +39,37 @@ Please respond with ONLY a JSON object in this exact format:
   "fat": number
 }
 
-All values should be numbers representing grams except calories. Be as accurate as possible.`;
+Use grams for macros. Calories is total calories.`;
 
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
       headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
       },
       body: JSON.stringify({
-        model: 'gpt-5-mini',
-        messages: [{ role: 'user', content: prompt }],
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: prompt }],
         max_tokens: 200,
         temperature: 0.1,
+        response_format: { type: "json_object" } // prevents non-JSON output
       }),
     });
 
     if (!response.ok) {
-      throw new Error('Failed to calculate nutrition with OpenAI');
+      throw new Error("Failed to calculate nutrition with OpenAI");
     }
 
     const data = await response.json();
-    const content = data.choices[0].message.content.trim();
+    const content = data.choices[0].message.content;
 
     let nutritionData: NutritionInfo;
+
     try {
       nutritionData = JSON.parse(content);
-    } catch (error) {
-      console.error('Failed to parse nutrition response:', content);
-      return res.status(500).json({ error: 'Invalid nutrition response format' });
+    } catch {
+      console.error("Invalid OpenAI JSON:", content);
+      return res.status(500).json({ error: "Invalid nutrition response format" });
     }
 
     res.json({ nutrition: nutritionData });
