@@ -70,6 +70,7 @@ model Recipe {
   servings     Int?
   imageUrl     String?
   nutrition    Json?
+  tags         String[] @default([])
   originalRecipeId String? // For tracking copied recipes
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
