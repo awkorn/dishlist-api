@@ -282,6 +282,15 @@ router.put("/me", authToken, async (req: AuthRequest, res) => {
     const { username, firstName, lastName, bio, avatarUrl } = req.body;
     const userId = req.user!.uid;
 
+    // Validate required fields if provided
+    if (username !== undefined && !username?.trim()) {
+      return res.status(400).json({ error: "Username cannot be empty" });
+    }
+
+    if (firstName !== undefined && !firstName?.trim()) {
+      return res.status(400).json({ error: "First name cannot be empty" });
+    }
+
     // If username is being changed, check if it's available
     if (username) {
       const existingUser = await prisma.user.findUnique({
@@ -293,16 +302,32 @@ router.put("/me", authToken, async (req: AuthRequest, res) => {
       }
     }
 
+    const updateData: Record<string, any> = {
+      updatedAt: new Date(),
+    };
+
+    // Required fields - only update if provided and non-empty
+    if (username !== undefined) {
+      updateData.username = username.trim();
+    }
+    if (firstName !== undefined) {
+      updateData.firstName = firstName.trim();
+    }
+
+    // Optional fields - can be set to null to clear
+    if (lastName !== undefined) {
+      updateData.lastName = lastName === null ? null : lastName.trim() || null;
+    }
+    if (bio !== undefined) {
+      updateData.bio = bio === null ? null : bio.trim() || null;
+    }
+    if (avatarUrl !== undefined) {
+      updateData.avatarUrl = avatarUrl === null ? null : avatarUrl;
+    }
+
     const updatedUser = await prisma.user.update({
       where: { uid: userId },
-      data: {
-        username: username || undefined,
-        firstName: firstName || undefined,
-        lastName: lastName || undefined,
-        bio: bio || undefined,
-        avatarUrl: avatarUrl || undefined,
-        updatedAt: new Date(),
-      },
+      data: updateData,
       include: {
         _count: {
           select: {
