@@ -279,6 +279,7 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
         description: dr.recipe.description,
         instructions: dr.recipe.instructions,
         ingredients: dr.recipe.ingredients,
+        tags: dr.recipe.tags,
         prepTime: dr.recipe.prepTime,
         cookTime: dr.recipe.cookTime,
         servings: dr.recipe.servings,
@@ -515,20 +516,19 @@ router.post("/:id/recipes", authToken, async (req: AuthRequest, res) => {
     const dishList = await prisma.dishList.findFirst({
       where: {
         id: dishListId,
-        OR: [
-          { ownerId: userId },
-          { collaborators: { some: { userId } } }
-        ]
-      }
+        OR: [{ ownerId: userId }, { collaborators: { some: { userId } } }],
+      },
     });
 
     if (!dishList) {
-      return res.status(403).json({ error: "Access denied or DishList not found" });
+      return res
+        .status(403)
+        .json({ error: "Access denied or DishList not found" });
     }
 
     // Verify recipe exists
     const recipe = await prisma.recipe.findUnique({
-      where: { id: recipeId }
+      where: { id: recipeId },
     });
 
     if (!recipe) {
@@ -540,9 +540,9 @@ router.post("/:id/recipes", authToken, async (req: AuthRequest, res) => {
       where: {
         dishListId_recipeId: {
           dishListId,
-          recipeId
-        }
-      }
+          recipeId,
+        },
+      },
     });
 
     if (existing) {
@@ -554,8 +554,8 @@ router.post("/:id/recipes", authToken, async (req: AuthRequest, res) => {
       data: {
         dishListId,
         recipeId,
-        addedById: userId
-      }
+        addedById: userId,
+      },
     });
 
     res.json({ message: "Recipe added successfully" });
@@ -565,42 +565,44 @@ router.post("/:id/recipes", authToken, async (req: AuthRequest, res) => {
   }
 });
 
-
 // Remove recipe from dishlist
-router.delete("/:id/recipes/:recipeId", authToken, async (req: AuthRequest, res) => {
-  try {
-    const dishListId = req.params.id;
-    const recipeId = req.params.recipeId;
-    const userId = req.user!.uid;
+router.delete(
+  "/:id/recipes/:recipeId",
+  authToken,
+  async (req: AuthRequest, res) => {
+    try {
+      const dishListId = req.params.id;
+      const recipeId = req.params.recipeId;
+      const userId = req.user!.uid;
 
-    // Verify user has access (owner or collaborator)
-    const dishList = await prisma.dishList.findFirst({
-      where: {
-        id: dishListId,
-        OR: [
-          { ownerId: userId },
-          { collaborators: { some: { userId } } }
-        ]
+      // Verify user has access (owner or collaborator)
+      const dishList = await prisma.dishList.findFirst({
+        where: {
+          id: dishListId,
+          OR: [{ ownerId: userId }, { collaborators: { some: { userId } } }],
+        },
+      });
+
+      if (!dishList) {
+        return res
+          .status(403)
+          .json({ error: "Access denied or DishList not found" });
       }
-    });
 
-    if (!dishList) {
-      return res.status(403).json({ error: "Access denied or DishList not found" });
+      // Remove the recipe from this dishlist
+      await prisma.dishListRecipe.deleteMany({
+        where: {
+          dishListId,
+          recipeId,
+        },
+      });
+
+      res.json({ message: "Recipe removed from DishList successfully" });
+    } catch (error) {
+      console.error("Remove recipe from dishlist error:", error);
+      res.status(500).json({ error: "Failed to remove recipe" });
     }
-
-    // Remove the recipe from this dishlist
-    await prisma.dishListRecipe.deleteMany({
-      where: {
-        dishListId,
-        recipeId
-      }
-    });
-
-    res.json({ message: "Recipe removed from DishList successfully" });
-  } catch (error) {
-    console.error("Remove recipe from dishlist error:", error);
-    res.status(500).json({ error: "Failed to remove recipe" });
   }
-});
+);
 
 export default router;
