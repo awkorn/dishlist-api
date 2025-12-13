@@ -605,4 +605,86 @@ router.delete(
   }
 );
 
+// Share a DishList with multiple users (creates notifications)
+router.post("/:id/share", authToken, async (req: AuthRequest, res) => {
+  try {
+    const dishListId = req.params.id;
+    const userId = req.user!.uid;
+    const { recipientIds } = req.body;
+
+    // Validate recipientIds
+    if (!recipientIds || !Array.isArray(recipientIds) || recipientIds.length === 0) {
+      return res.status(400).json({ error: "At least one recipient is required" });
+    }
+
+    // Get the DishList to verify it exists and is public
+    const dishList = await prisma.dishList.findUnique({
+      where: { id: dishListId },
+      include: {
+        owner: {
+          select: {
+            uid: true,
+            username: true,
+            firstName: true,
+            lastName: true,
+          },
+        },
+      },
+    });
+
+    if (!dishList) {
+      return res.status(404).json({ error: "DishList not found" });
+    }
+
+    // Only allow sharing public DishLists
+    if (dishList.visibility !== "PUBLIC") {
+      return res.status(403).json({ error: "Only public DishLists can be shared" });
+    }
+
+    // Get sender info
+    const sender = await prisma.user.findUnique({
+      where: { uid: userId },
+      select: {
+        uid: true,
+        username: true,
+        firstName: true,
+        lastName: true,
+      },
+    });
+
+    if (!sender) {
+      return res.status(404).json({ error: "Sender not found" });
+    }
+
+    // Build sender display name
+    const senderName = sender.firstName || sender.username || "Someone";
+
+    // Create notifications for all recipients
+    const notifications = await prisma.notification.createMany({
+      data: recipientIds.map((recipientId: string) => ({
+        type: "DISHLIST_SHARED" as const,
+        title: `${senderName} shared a DishList with you`,
+        message: dishList.title,
+        senderId: userId,
+        receiverId: recipientId,
+        data: JSON.stringify({
+          dishListId: dishList.id,
+          dishListTitle: dishList.title,
+          senderId: userId,
+          senderName,
+        }),
+      })),
+      skipDuplicates: true,
+    });
+
+    res.json({
+      success: true,
+      notificationsSent: notifications.count,
+    });
+  } catch (error) {
+    console.error("Share dishlist error:", error);
+    res.status(500).json({ error: "Failed to share DishList" });
+  }
+});
+
 export default router;

@@ -345,4 +345,67 @@ router.put("/me", authToken, async (req: AuthRequest, res) => {
   }
 });
 
+// Get user's mutuals (users you follow who also follow you back)
+router.get("/mutuals", authToken, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.user!.uid;
+    const { search } = req.query;
+
+    // Find users where:
+    // 1. Current user follows them (they are in user's "following" list)
+    // 2. They follow current user back (user is in their "following" list)
+    const mutuals = await prisma.user.findMany({
+      where: {
+        AND: [
+          // I follow them
+          {
+            followers: {
+              some: {
+                followerId: userId,
+              },
+            },
+          },
+          // They follow me
+          {
+            following: {
+              some: {
+                followingId: userId,
+              },
+            },
+          },
+          // Optional search filter
+          ...(search
+            ? [
+                {
+                  OR: [
+                    { username: { contains: search as string, mode: "insensitive" as const } },
+                    { firstName: { contains: search as string, mode: "insensitive" as const } },
+                    { lastName: { contains: search as string, mode: "insensitive" as const } },
+                  ],
+                },
+              ]
+            : []),
+        ],
+      },
+      select: {
+        uid: true,
+        username: true,
+        firstName: true,
+        lastName: true,
+        avatarUrl: true,
+      },
+      orderBy: [
+        { firstName: "asc" },
+        { lastName: "asc" },
+        { username: "asc" },
+      ],
+    });
+
+    res.json({ mutuals });
+  } catch (error) {
+    console.error("Get mutuals error:", error);
+    res.status(500).json({ error: "Failed to fetch mutuals" });
+  }
+});
+
 export default router;
