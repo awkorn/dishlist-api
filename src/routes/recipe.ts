@@ -136,10 +136,126 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
       return res.status(404).json({ error: "Recipe not found" });
     }
 
-    res.json({ recipe });
+    // Check if recipe is on any public DishList (makes it shareable)
+    const publicDishListEntry = await prisma.dishListRecipe.findFirst({
+      where: {
+        recipeId: recipe.id,
+        dishList: {
+          visibility: "PUBLIC",
+        },
+      },
+    });
+
+    const isShareable = publicDishListEntry !== null;
+
+    res.json({
+      recipe: {
+        ...recipe,
+        isShareable,
+      },
+    });
   } catch (error) {
     console.error("Get recipe error:", error);
     res.status(500).json({ error: "Failed to fetch recipe" });
+  }
+});
+
+// Share a Recipe
+router.post("/:id/share", authToken, async (req: AuthRequest, res) => {
+  try {
+    const recipeId = req.params.id;
+    const userId = req.user!.uid;
+    const { recipientIds } = req.body;
+
+    // Validate recipientIds
+    if (
+      !recipientIds ||
+      !Array.isArray(recipientIds) ||
+      recipientIds.length === 0
+    ) {
+      return res
+        .status(400)
+        .json({ error: "At least one recipient is required" });
+    }
+
+    // Get the Recipe to verify it exists
+    const recipe = await prisma.recipe.findUnique({
+      where: { id: recipeId },
+      include: {
+        creator: {
+          select: {
+            uid: true,
+            username: true,
+            firstName: true,
+            lastName: true,
+          },
+        },
+      },
+    });
+
+    if (!recipe) {
+      return res.status(404).json({ error: "Recipe not found" });
+    }
+
+    // Verify recipe is on at least one public DishList (shareable)
+    const publicDishListEntry = await prisma.dishListRecipe.findFirst({
+      where: {
+        recipeId: recipe.id,
+        dishList: {
+          visibility: "PUBLIC",
+        },
+      },
+    });
+
+    if (!publicDishListEntry) {
+      return res
+        .status(403)
+        .json({ error: "Only recipes on public DishLists can be shared" });
+    }
+
+    // Get sender info
+    const sender = await prisma.user.findUnique({
+      where: { uid: userId },
+      select: {
+        uid: true,
+        username: true,
+        firstName: true,
+        lastName: true,
+      },
+    });
+
+    if (!sender) {
+      return res.status(404).json({ error: "Sender not found" });
+    }
+
+    // Build sender display name
+    const senderName = sender.firstName || sender.username || "Someone";
+
+    // Create notifications for all recipients
+    const notifications = await prisma.notification.createMany({
+      data: recipientIds.map((recipientId: string) => ({
+        type: "RECIPE_SHARED" as const,
+        title: `${senderName} shared a recipe with you`,
+        message: recipe.title,
+        senderId: userId,
+        receiverId: recipientId,
+        data: JSON.stringify({
+          recipeId: recipe.id,
+          recipeTitle: recipe.title,
+          senderId: userId,
+          senderName,
+        }),
+      })),
+      skipDuplicates: true,
+    });
+
+    res.json({
+      success: true,
+      notificationsSent: notifications.count,
+    });
+  } catch (error) {
+    console.error("Share recipe error:", error);
+    res.status(500).json({ error: "Failed to share recipe" });
   }
 });
 
