@@ -5,6 +5,7 @@ import usersRouter from "./routes/users";
 import dishlistsRouter from "./routes/dishlists";
 import recipeRouter from "./routes/recipe";
 import nutritionRouter from "./routes/nutrition";
+import notificationsRouter from "./routes/notifications";
 import "./lib/firebase";
 
 if (!process.env.OPENAI_API_KEY) {
@@ -24,6 +25,7 @@ app.use(express.json({ limit: '10mb' }));
 app.use("/health", healthRouter);
 app.use("/users", usersRouter);
 app.use("/dishlists", dishlistsRouter);
+app.use("/notifications", notificationsRouter);
 app.use("/recipes", recipeRouter);
 app.use("/nutrition", nutritionRouter);
 
