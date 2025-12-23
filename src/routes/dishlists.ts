@@ -194,19 +194,32 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
   }
 });
 
-// Get single dishlist with recipes
+// Get dishlist details
 router.get("/:id", authToken, async (req: AuthRequest, res) => {
   try {
     const dishListId = req.params.id;
     const userId = req.user!.uid;
 
-    const dishList = await prisma.dishList.findUnique({
-      where: { id: dishListId },
+    // Build visibility condition
+    const visibilityCondition = {
+      OR: [
+        { visibility: "PUBLIC" as const },
+        { ownerId: userId },
+        { collaborators: { some: { userId } } },
+      ],
+    };
+
+    const dishList = await prisma.dishList.findFirst({
+      where: {
+        id: dishListId,
+        ...visibilityCondition,
+      },
       include: {
         _count: {
           select: {
             recipes: true,
             followers: true,
+            collaborators: true, 
           },
         },
         owner: {
@@ -215,6 +228,7 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
             username: true,
             firstName: true,
             lastName: true,
+            avatarUrl: true, 
           },
         },
         collaborators: {
@@ -249,17 +263,7 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
       return res.status(404).json({ error: "DishList not found" });
     }
 
-    // Check if user has access to private dishlist
-    if (dishList.visibility === "PRIVATE") {
-      const hasAccess =
-        dishList.ownerId === userId || dishList.collaborators.length > 0;
-
-      if (!hasAccess) {
-        return res.status(403).json({ error: "Access denied" });
-      }
-    }
-
-    // Transform data for frontend
+    // Transform response
     const transformedDishList = {
       id: dishList.id,
       title: dishList.title,
@@ -269,6 +273,7 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
       isPinned: dishList.isPinned,
       recipeCount: dishList._count.recipes,
       followerCount: dishList._count.followers,
+      collaboratorCount: dishList._count.collaborators,
       isOwner: dishList.ownerId === userId,
       isCollaborator: dishList.collaborators.length > 0,
       isFollowing: dishList.followers.length > 0,
@@ -405,6 +410,7 @@ router.post("/:id/pin", authToken, async (req: AuthRequest, res) => {
   }
 });
 
+// Unpin dishlist
 router.delete("/:id/pin", authToken, async (req: AuthRequest, res) => {
   try {
     const dishListId = req.params.id;
@@ -686,5 +692,322 @@ router.post("/:id/share", authToken, async (req: AuthRequest, res) => {
     res.status(500).json({ error: "Failed to share DishList" });
   }
 });
+
+// ============================================
+// GET /:id/collaborators
+// Get collaborators and pending invites for a DishList
+// Owner sees all; collaborators see confirmed only
+// ============================================
+router.get("/:id/collaborators", authToken, async (req: AuthRequest, res) => {
+  try {
+    const dishListId = req.params.id;
+    const userId = req.user!.uid;
+
+    // Verify DishList exists and user has access
+    const dishList = await prisma.dishList.findFirst({
+      where: {
+        id: dishListId,
+        OR: [
+          { ownerId: userId },
+          { collaborators: { some: { userId } } },
+        ],
+      },
+      include: {
+        owner: {
+          select: {
+            uid: true,
+            username: true,
+            firstName: true,
+            lastName: true,
+            avatarUrl: true,
+          },
+        },
+      },
+    });
+
+    if (!dishList) {
+      return res.status(404).json({ error: "DishList not found or access denied" });
+    }
+
+    const isOwner = dishList.ownerId === userId;
+
+    // Get confirmed collaborators
+    const collaborators = await prisma.dishListCollaborator.findMany({
+      where: { dishListId },
+      include: {
+        user: {
+          select: {
+            uid: true,
+            username: true,
+            firstName: true,
+            lastName: true,
+            avatarUrl: true,
+          },
+        },
+      },
+      orderBy: { invitedAt: "asc" },
+    });
+
+    // Only owner can see pending invites
+    let pendingInvites: any[] = [];
+    if (isOwner) {
+      pendingInvites = await prisma.dishListInvite.findMany({
+        where: {
+          dishListId,
+          usedAt: null,
+          expiresAt: { gt: new Date() },
+          inviteeId: { not: null }, // Only show direct invites, not link invites
+        },
+        include: {
+          invitee: {
+            select: {
+              uid: true,
+              username: true,
+              firstName: true,
+              lastName: true,
+              avatarUrl: true,
+            },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+      });
+    }
+
+    res.json({
+      owner: dishList.owner,
+      collaborators: collaborators.map((c) => ({
+        id: c.id,
+        joinedAt: c.invitedAt,
+        user: c.user,
+      })),
+      pendingInvites: pendingInvites.map((i) => ({
+        id: i.id,
+        token: i.token,
+        createdAt: i.createdAt,
+        expiresAt: i.expiresAt,
+        user: i.invitee,
+      })),
+      isOwner,
+      totalCount: collaborators.length + 1, // +1 for owner
+    });
+  } catch (error) {
+    console.error("Get collaborators error:", error);
+    res.status(500).json({ error: "Failed to fetch collaborators" });
+  }
+});
+
+// ============================================
+// DELETE /:id/collaborators/:collaboratorUserId
+// Remove a collaborator (owner only)
+// ============================================
+router.delete(
+  "/:id/collaborators/:collaboratorUserId",
+  authToken,
+  async (req: AuthRequest, res) => {
+    try {
+      const dishListId = req.params.id;
+      const collaboratorUserId = req.params.collaboratorUserId;
+      const userId = req.user!.uid;
+
+      // Verify ownership
+      const dishList = await prisma.dishList.findUnique({
+        where: { id: dishListId },
+      });
+
+      if (!dishList) {
+        return res.status(404).json({ error: "DishList not found" });
+      }
+
+      if (dishList.ownerId !== userId) {
+        return res.status(403).json({ error: "Only the owner can remove collaborators" });
+      }
+
+      // Delete the collaborator
+      const deleted = await prisma.dishListCollaborator.deleteMany({
+        where: {
+          dishListId,
+          userId: collaboratorUserId,
+        },
+      });
+
+      if (deleted.count === 0) {
+        return res.status(404).json({ error: "Collaborator not found" });
+      }
+
+      res.json({ success: true, message: "Collaborator removed" });
+    } catch (error) {
+      console.error("Remove collaborator error:", error);
+      res.status(500).json({ error: "Failed to remove collaborator" });
+    }
+  }
+);
+
+// ============================================
+// DELETE /:id/invites/:inviteId
+// Revoke a pending invite (owner only)
+// ============================================
+router.delete(
+  "/:id/invites/:inviteId",
+  authToken,
+  async (req: AuthRequest, res) => {
+    try {
+      const dishListId = req.params.id;
+      const inviteId = req.params.inviteId;
+      const userId = req.user!.uid;
+
+      // Verify ownership
+      const dishList = await prisma.dishList.findUnique({
+        where: { id: dishListId },
+      });
+
+      if (!dishList) {
+        return res.status(404).json({ error: "DishList not found" });
+      }
+
+      if (dishList.ownerId !== userId) {
+        return res.status(403).json({ error: "Only the owner can revoke invites" });
+      }
+
+      // Get invite to find the invitee for notification cleanup
+      const invite = await prisma.dishListInvite.findFirst({
+        where: {
+          id: inviteId,
+          dishListId,
+        },
+      });
+
+      if (!invite) {
+        return res.status(404).json({ error: "Invite not found" });
+      }
+
+      // Delete invite and related notification
+      await prisma.$transaction(async (tx) => {
+        await tx.dishListInvite.delete({
+          where: { id: inviteId },
+        });
+
+        // Delete notification if it was a direct invite
+        if (invite.inviteeId) {
+          await tx.notification.deleteMany({
+            where: {
+              type: "DISHLIST_INVITATION",
+              receiverId: invite.inviteeId,
+              data: { contains: dishListId },
+            },
+          });
+        }
+      });
+
+      res.json({ success: true, message: "Invite revoked" });
+    } catch (error) {
+      console.error("Revoke invite error:", error);
+      res.status(500).json({ error: "Failed to revoke invite" });
+    }
+  }
+);
+
+// ============================================
+// POST /:id/invites/:inviteId/resend
+// Resend notification for a pending invite (owner only)
+// ============================================
+router.post(
+  "/:id/invites/:inviteId/resend",
+  authToken,
+  async (req: AuthRequest, res) => {
+    try {
+      const dishListId = req.params.id;
+      const inviteId = req.params.inviteId;
+      const userId = req.user!.uid;
+
+      // Verify ownership
+      const dishList = await prisma.dishList.findUnique({
+        where: { id: dishListId },
+      });
+
+      if (!dishList) {
+        return res.status(404).json({ error: "DishList not found" });
+      }
+
+      if (dishList.ownerId !== userId) {
+        return res.status(403).json({ error: "Only the owner can resend invites" });
+      }
+
+      // Get invite
+      const invite = await prisma.dishListInvite.findFirst({
+        where: {
+          id: inviteId,
+          dishListId,
+          usedAt: null,
+          inviteeId: { not: null },
+        },
+      });
+
+      if (!invite) {
+        return res.status(404).json({ error: "Pending invite not found" });
+      }
+
+      if (!invite.inviteeId) {
+        return res.status(400).json({ error: "Cannot resend link invites" });
+      }
+
+      // Get sender info
+      const sender = await prisma.user.findUnique({
+        where: { uid: userId },
+        select: { firstName: true, username: true },
+      });
+
+      const senderName = sender?.firstName || sender?.username || "Someone";
+
+      // Extend expiry and resend notification
+      const newExpiresAt = new Date();
+      newExpiresAt.setDate(newExpiresAt.getDate() + 7);
+
+      await prisma.$transaction(async (tx) => {
+        // Update invite expiry
+        await tx.dishListInvite.update({
+          where: { id: inviteId },
+          data: { expiresAt: newExpiresAt },
+        });
+
+        // Delete old notification
+        await tx.notification.deleteMany({
+          where: {
+            type: "DISHLIST_INVITATION",
+            receiverId: invite.inviteeId!,
+            senderId: userId,
+            data: { contains: dishListId },
+          },
+        });
+
+        // Create fresh notification
+        await tx.notification.create({
+          data: {
+            type: "DISHLIST_INVITATION",
+            title: `${senderName} invited you to collaborate`,
+            message: dishList.title,
+            senderId: userId,
+            receiverId: invite.inviteeId!,
+            data: JSON.stringify({
+              dishListId: dishList.id,
+              dishListTitle: dishList.title,
+              inviteId: invite.id,
+              senderId: userId,
+              senderName,
+            }),
+          },
+        });
+      });
+
+      res.json({
+        success: true,
+        message: "Invite resent",
+        expiresAt: newExpiresAt,
+      });
+    } catch (error) {
+      console.error("Resend invite error:", error);
+      res.status(500).json({ error: "Failed to resend invite" });
+    }
+  }
+);
 
 export default router;
