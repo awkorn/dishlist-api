@@ -2,6 +2,11 @@ import { Router } from "express";
 import prisma from "../lib/prisma";
 import { authToken, AuthRequest } from "../middleware/auth";
 import { normalizeTags, validateTags } from "../utils/tags";
+import {
+  validateRecipeItems,
+  cleanRecipeItems,
+  RecipeItem,
+} from "../types/recipe";
 
 const router = Router();
 
@@ -29,24 +34,16 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
       return res.status(400).json({ error: "Title is required" });
     }
 
-    if (
-      !ingredients ||
-      !Array.isArray(ingredients) ||
-      ingredients.length === 0
-    ) {
-      return res
-        .status(400)
-        .json({ error: "At least one ingredient is required" });
+    // Validate ingredients (new structured format)
+    const ingredientsError = validateRecipeItems(ingredients, "ingredients");
+    if (ingredientsError) {
+      return res.status(400).json({ error: ingredientsError });
     }
 
-    if (
-      !instructions ||
-      !Array.isArray(instructions) ||
-      instructions.length === 0
-    ) {
-      return res
-        .status(400)
-        .json({ error: "At least one instruction is required" });
+    // Validate instructions (new structured format)
+    const instructionsError = validateRecipeItems(instructions, "instructions");
+    if (instructionsError) {
+      return res.status(400).json({ error: instructionsError });
     }
 
     if (dishListId) {
@@ -70,13 +67,17 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
       return res.status(400).json({ error: tagsError });
     }
 
+    // Clean items before saving
+    const cleanedIngredients = cleanRecipeItems(ingredients as RecipeItem[]);
+    const cleanedInstructions = cleanRecipeItems(instructions as RecipeItem[]);
+
     // Create recipe
     const recipe = await prisma.recipe.create({
       data: {
         title: title.trim(),
         description: description?.trim() || null,
-        instructions: instructions.filter((inst) => inst.trim()),
-        ingredients: ingredients.filter((ing) => ing.trim()),
+        instructions: cleanedInstructions as any,
+        ingredients: cleanedIngredients as any,
         prepTime: prepTime || null,
         cookTime: cookTime || null,
         servings: servings || null,
@@ -97,7 +98,7 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
       },
     });
 
-    // Add to dishlist if specified
+    // Add to dishlist if provided
     if (dishListId) {
       await prisma.dishListRecipe.create({
         data: {
@@ -298,24 +299,16 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
       return res.status(400).json({ error: "Title is required" });
     }
 
-    if (
-      !ingredients ||
-      !Array.isArray(ingredients) ||
-      ingredients.length === 0
-    ) {
-      return res
-        .status(400)
-        .json({ error: "At least one ingredient is required" });
+    // Validate ingredients (new structured format)
+    const ingredientsError = validateRecipeItems(ingredients, "ingredients");
+    if (ingredientsError) {
+      return res.status(400).json({ error: ingredientsError });
     }
 
-    if (
-      !instructions ||
-      !Array.isArray(instructions) ||
-      instructions.length === 0
-    ) {
-      return res
-        .status(400)
-        .json({ error: "At least one instruction is required" });
+    // Validate instructions (new structured format)
+    const instructionsError = validateRecipeItems(instructions, "instructions");
+    if (instructionsError) {
+      return res.status(400).json({ error: instructionsError });
     }
 
     const tagsError = validateTags(tags);
@@ -323,10 +316,14 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
       return res.status(400).json({ error: tagsError });
     }
 
+    // Clean items before saving
+    const cleanedIngredients = cleanRecipeItems(ingredients as RecipeItem[]);
+    const cleanedInstructions = cleanRecipeItems(instructions as RecipeItem[]);
+
     // Check if ingredients changed - if so, clear nutrition
     const ingredientsChanged =
       JSON.stringify(existingRecipe.ingredients) !==
-      JSON.stringify(ingredients);
+      JSON.stringify(cleanedIngredients);
     const nutritionData = ingredientsChanged
       ? null
       : nutrition || existingRecipe.nutrition;
@@ -337,8 +334,8 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
       data: {
         title: title.trim(),
         description: description?.trim() || null,
-        instructions: instructions.filter((inst) => inst.trim()),
-        ingredients: ingredients.filter((ing) => ing.trim()),
+        instructions: cleanedInstructions as any,
+        ingredients: cleanedIngredients as any,
         prepTime: prepTime || null,
         cookTime: cookTime || null,
         servings: servings || null,
@@ -421,32 +418,37 @@ router.post("/import-from-images", authToken, async (req: AuthRequest, res) => {
 
 If multiple images are provided, they are different parts/pages of the SAME recipe - consolidate them into one complete recipe.
 
-Extract and return a JSON object with these fields:
-- title: string (recipe name)
-- prepTime: number | null (preparation time in minutes)
-- cookTime: number | null (cooking time in minutes)  
-- servings: number | null (number of servings)
-- ingredients: string[] (list of ingredients with quantities)
-- instructions: string[] (step-by-step instructions)
+IMPORTANT: Ingredients and instructions may have subsections (e.g., "For the Sauce:", "For the Dough:"). 
+- If you detect subsections, include them as separate items with type "header"
+- Regular items should have type "item"
+
+Return a JSON object with this exact structure:
+{
+  "title": "Recipe Name",
+  "description": "Brief description if visible",
+  "prepTime": number or null (in minutes),
+  "cookTime": number or null (in minutes),
+  "servings": number or null,
+  "ingredients": [
+    { "type": "item", "text": "2 cups flour" },
+    { "type": "header", "text": "For the Sauce" },
+    { "type": "item", "text": "1 can tomatoes" }
+  ],
+  "instructions": [
+    { "type": "item", "text": "Preheat oven to 350°F" },
+    { "type": "header", "text": "Making the Sauce" },
+    { "type": "item", "text": "Heat oil in a pan" }
+  ]
+}
 
 Rules:
-1. If a field cannot be determined from the image, use null (for numbers) or empty array (for arrays)
-2. Keep ingredient quantities and units as shown in the image
-3. Number each instruction step if not already numbered
-4. Preserve the original wording as much as possible
-5. If text is unclear or partially visible, make your best reasonable interpretation
-
-Respond with ONLY valid JSON. No markdown, no code blocks, no explanation.
-
-Example format:
-{
-  "title": "Chocolate Chip Cookies",
-  "prepTime": 15,
-  "cookTime": 12,
-  "servings": 24,
-  "ingredients": ["2 cups all-purpose flour", "1 cup butter, softened"],
-  "instructions": ["Preheat oven to 375°F", "Mix flour and butter"]
-}`;
+- Each ingredient should be a complete item (e.g., "2 cups all-purpose flour")
+- Each instruction should be a complete step
+- Subsection headers should be concise (e.g., "For the Sauce", "Dough", "Assembly")
+- If no clear subsections exist, just use type "item" for everything
+- Return ONLY the JSON object, no additional text
+- If information is not visible/available, use null for that field
+- Do not include empty strings in arrays`;
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
