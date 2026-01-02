@@ -66,7 +66,12 @@ interface ScoredDishList {
 function calculateTextScore(
   query: string,
   text: string | null,
-  weights: { exact: number; startsWith: number; wordMatch: number; contains: number }
+  weights: {
+    exact: number;
+    startsWith: number;
+    wordMatch: number;
+    contains: number;
+  }
 ): number {
   if (!text) return 0;
 
@@ -84,7 +89,10 @@ function calculateTextScore(
   }
 
   // Full word match (query appears as complete word)
-  const wordBoundaryRegex = new RegExp(`\\b${escapeRegex(normalizedQuery)}\\b`, "i");
+  const wordBoundaryRegex = new RegExp(
+    `\\b${escapeRegex(normalizedQuery)}\\b`,
+    "i"
+  );
   if (wordBoundaryRegex.test(normalizedText)) {
     return weights.wordMatch;
   }
@@ -116,7 +124,8 @@ function calculatePopularityBoost(count: number, maxBoost: number): number {
  * Calculate recency boost (within last 30 days)
  */
 function calculateRecencyBoost(updatedAt: Date, maxBoost: number): number {
-  const daysSinceUpdate = (Date.now() - updatedAt.getTime()) / (1000 * 60 * 60 * 24);
+  const daysSinceUpdate =
+    (Date.now() - updatedAt.getTime()) / (1000 * 60 * 60 * 24);
   if (daysSinceUpdate > 30) return 0;
   return maxBoost * (1 - daysSinceUpdate / 30);
 }
@@ -228,7 +237,8 @@ function scoreRecipe(
   if (recipe.ingredients && Array.isArray(recipe.ingredients)) {
     for (let i = 0; i < recipe.ingredients.length; i++) {
       const ingredient = recipe.ingredients[i];
-      const ingredientText = typeof ingredient === "string" ? ingredient : ingredient?.text;
+      const ingredientText =
+        typeof ingredient === "string" ? ingredient : ingredient?.text;
       if (ingredientText) {
         const isTopIngredient = i < 3;
         const ingredientScore = calculateTextScore(query, ingredientText, {
@@ -366,16 +376,27 @@ function scoreDishList(
   // Recipe titles inside DishList (secondary)
   if (dishList.recipes && Array.isArray(dishList.recipes)) {
     for (const dlRecipe of dishList.recipes) {
-      const recipeTitle = dlRecipe.recipe?.title;
-      const recipeScore = calculateTextScore(query, recipeTitle, {
-        exact: 35,
-        startsWith: 30,
-        wordMatch: 25,
-        contains: 18,
-      });
-      if (recipeScore > 0) {
-        score += recipeScore;
-        break; // Only count best recipe title match
+      const ingredients = dlRecipe.recipe?.ingredients;
+      if (ingredients && Array.isArray(ingredients)) {
+        let foundIngredientMatch = false;
+        for (const ingredient of ingredients) {
+          const ingredientText =
+            typeof ingredient === "string" ? ingredient : ingredient?.text;
+          if (ingredientText) {
+            const ingredientScore = calculateTextScore(query, ingredientText, {
+              exact: 30,
+              startsWith: 25,
+              wordMatch: 20,
+              contains: 15,
+            });
+            if (ingredientScore > 0) {
+              score += ingredientScore;
+              foundIngredientMatch = true;
+              break; // Only count best ingredient match per recipe
+            }
+          }
+        }
+        if (foundIngredientMatch) break; // Only count one recipe's ingredient match
       }
     }
   }
@@ -486,16 +507,15 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
 
     const followingIds = new Set(followingRelations.map((f) => f.followingId));
     const followerIds = new Set(followerRelations.map((f) => f.followerId));
-    const followedDishListIds = new Set(followedDishLists.map((f) => f.dishListId));
+    const followedDishListIds = new Set(
+      followedDishLists.map((f) => f.dishListId)
+    );
 
     // For recipe scoring, we need saved recipes (recipes in user's DishLists)
     const userDishListRecipes = await prisma.dishListRecipe.findMany({
       where: {
         dishList: {
-          OR: [
-            { ownerId: userId },
-            { collaborators: { some: { userId } } },
-          ],
+          OR: [{ ownerId: userId }, { collaborators: { some: { userId } } }],
         },
       },
       select: { recipeId: true },
@@ -509,14 +529,38 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
       // ALL tab: fetch limited results from each category
       const [users, recipes, dishLists] = await Promise.all([
         searchUsers(query, userId, followingIds, followerIds, true, 10),
-        searchRecipes(query, userId, followingIds, savedRecipeIds, followedDishListIds, true, 10),
-        searchDishLists(query, userId, followingIds, followedDishListIds, true, 10),
+        searchRecipes(
+          query,
+          userId,
+          followingIds,
+          savedRecipeIds,
+          followedDishListIds,
+          true,
+          10
+        ),
+        searchDishLists(
+          query,
+          userId,
+          followingIds,
+          followedDishListIds,
+          true,
+          10
+        ),
       ]);
 
       // Apply category normalization for ALL tab
-      const normalizedUsers = users.map((u) => ({ ...u, score: u.score * 1.0 }));
-      const normalizedRecipes = recipes.map((r) => ({ ...r, score: r.score * 0.9 }));
-      const normalizedDishLists = dishLists.map((d) => ({ ...d, score: d.score * 0.95 }));
+      const normalizedUsers = users.map((u) => ({
+        ...u,
+        score: u.score * 1.0,
+      }));
+      const normalizedRecipes = recipes.map((r) => ({
+        ...r,
+        score: r.score * 0.9,
+      }));
+      const normalizedDishLists = dishLists.map((d) => ({
+        ...d,
+        score: d.score * 0.95,
+      }));
 
       return res.json({
         users: normalizedUsers,
@@ -646,7 +690,9 @@ async function searchUsers(
 
   // Score and filter
   const scored = users
-    .map((user) => scoreUser(user, query, currentUserId, followingIds, followerIds, isAllTab))
+    .map((user) =>
+      scoreUser(user, query, currentUserId, followingIds, followerIds, isAllTab)
+    )
     .filter((u) => u.score >= minScore)
     .sort((a, b) => {
       // Primary: score descending
@@ -728,7 +774,14 @@ async function searchRecipes(
   // Score and filter
   const scored = recipes
     .map((recipe) =>
-      scoreRecipe(recipe, query, currentUserId, followingIds, savedRecipeIds, isAllTab)
+      scoreRecipe(
+        recipe,
+        query,
+        currentUserId,
+        followingIds,
+        savedRecipeIds,
+        isAllTab
+      )
     )
     .filter((r) => r.score >= minScore)
     .sort((a, b) => {
@@ -819,10 +872,13 @@ async function searchDishLists(
         },
       },
       recipes: {
-        take: 5, // Only fetch a few for title matching
+        take: 10,
         select: {
           recipe: {
-            select: { title: true },
+            select: {
+              title: true,
+              ingredients: true, // Include ingredients for scoring
+            },
           },
         },
       },
@@ -839,7 +895,14 @@ async function searchDishLists(
   // Score and filter
   const scored = dishLists
     .map((dishList) =>
-      scoreDishList(dishList, query, currentUserId, followingIds, followedDishListIds, isAllTab)
+      scoreDishList(
+        dishList,
+        query,
+        currentUserId,
+        followingIds,
+        followedDishListIds,
+        isAllTab
+      )
     )
     .filter((d) => d.score >= minScore)
     .sort((a, b) => {
