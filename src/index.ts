@@ -7,6 +7,7 @@ import recipeRouter from "./routes/recipe";
 import nutritionRouter from "./routes/nutrition";
 import notificationsRouter from "./routes/notifications";
 import invitesRouter from "./routes/invites";
+import searchRouter from "./routes/search";
 import "./lib/firebase";
 
 if (!process.env.OPENAI_API_KEY) {
@@ -30,6 +31,7 @@ app.use("/notifications", notificationsRouter);
 app.use("/recipes", recipeRouter);
 app.use("/nutrition", nutritionRouter);
 app.use("/invites", invitesRouter);
+app.use("/search", searchRouter);
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`API running on http://localhost:${port}`));
