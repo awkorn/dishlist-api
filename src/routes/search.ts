@@ -376,9 +376,26 @@ function scoreDishList(
   // Recipe titles inside DishList (secondary)
   if (dishList.recipes && Array.isArray(dishList.recipes)) {
     for (const dlRecipe of dishList.recipes) {
+      const recipeTitle = dlRecipe.recipe?.title;
+      const recipeScore = calculateTextScore(query, recipeTitle, {
+        exact: 35,
+        startsWith: 30,
+        wordMatch: 25,
+        contains: 18,
+      });
+      if (recipeScore > 0) {
+        score += recipeScore;
+        break; // Only count best recipe title match
+      }
+    }
+  }
+
+  // Recipe ingredients inside DishList (secondary)
+  if (dishList.recipes && Array.isArray(dishList.recipes)) {
+    let foundIngredientMatch = false;
+    for (const dlRecipe of dishList.recipes) {
       const ingredients = dlRecipe.recipe?.ingredients;
       if (ingredients && Array.isArray(ingredients)) {
-        let foundIngredientMatch = false;
         for (const ingredient of ingredients) {
           const ingredientText =
             typeof ingredient === "string" ? ingredient : ingredient?.text;
