@@ -24,6 +24,7 @@ model User {
   followedDishLists DishListFollower[]
   createdRecipes    Recipe[]               @relation("RecipeCreator")
   addedRecipes      DishListRecipe[]       @relation("UserAddedRecipes")
+  pinnedDishLists   UserDishListPin[]
 
   // User following relationships
   followers UserFollow[] @relation("UserFollowers")
@@ -46,7 +47,6 @@ model DishList {
   description String?
   visibility  DishListVisibility @default(PUBLIC)
   isDefault   Boolean            @default(false)
-  isPinned    Boolean            @default(false)
   createdAt   DateTime           @default(now())
   updatedAt   DateTime           @updatedAt
 
@@ -59,6 +59,7 @@ model DishList {
   collaborators DishListCollaborator[]
   followers     DishListFollower[]
   invites       DishListInvite[]
+  pins          UserDishListPin[]
 
   @@map("DishList")
 }
@@ -140,6 +141,21 @@ model DishListFollower {
 
   @@unique([dishListId, userId])
   @@map("DishListFollower")
+}
+
+model UserDishListPin {
+  id        String   @id @default(cuid())
+  pinnedAt  DateTime @default(now())
+
+  // Relations
+  dishListId String
+  dishList   DishList @relation(fields: [dishListId], references: [id], onDelete: Cascade)
+
+  userId String
+  user   User   @relation(fields: [userId], references: [uid], onDelete: Cascade)
+
+  @@unique([dishListId, userId])
+  @@map("UserDishListPin")
 }
 
 model DishListInvite {

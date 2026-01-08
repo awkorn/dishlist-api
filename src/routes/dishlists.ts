@@ -62,12 +62,12 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
           where: { userId },
           select: { userId: true },
         },
+        pins: {
+          where: { userId },
+          select: { userId: true },
+        },
       },
-      orderBy: [
-        { isDefault: "desc" },
-        { isPinned: "desc" },
-        { updatedAt: "desc" },
-      ],
+      orderBy: [{ isDefault: "desc" }, { updatedAt: "desc" }],
     });
 
     // Transform data for frontend
@@ -77,7 +77,7 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
       description: list.description,
       visibility: list.visibility,
       isDefault: list.isDefault,
-      isPinned: list.isPinned,
+      isPinned: list.pins.length > 0,
       recipeCount: list._count.recipes,
       isOwner: list.ownerId === userId,
       isCollaborator: list.collaborators.length > 0,
@@ -86,6 +86,13 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
       createdAt: list.createdAt,
       updatedAt: list.updatedAt,
     }));
+
+    // Sort: default first, then pinned, then by updatedAt
+    transformedLists.sort((a, b) => {
+      if (a.isDefault !== b.isDefault) return b.isDefault ? 1 : -1;
+      if (a.isPinned !== b.isPinned) return b.isPinned ? 1 : -1;
+      return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+    });
 
     res.json({ dishLists: transformedLists });
   } catch (error) {
@@ -219,7 +226,7 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
           select: {
             recipes: true,
             followers: true,
-            collaborators: true, 
+            collaborators: true,
           },
         },
         owner: {
@@ -228,7 +235,7 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
             username: true,
             firstName: true,
             lastName: true,
-            avatarUrl: true, 
+            avatarUrl: true,
           },
         },
         collaborators: {
@@ -256,6 +263,10 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
           },
           orderBy: { addedAt: "desc" },
         },
+        pins: {
+          where: { userId },
+          select: { userId: true },
+        },
       },
     });
 
@@ -270,7 +281,7 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
       description: dishList.description,
       visibility: dishList.visibility,
       isDefault: dishList.isDefault,
-      isPinned: dishList.isPinned,
+      isPinned: dishList.pins.length > 0,
       recipeCount: dishList._count.recipes,
       followerCount: dishList._count.followers,
       collaboratorCount: dishList._count.collaborators,
@@ -398,9 +409,19 @@ router.post("/:id/pin", authToken, async (req: AuthRequest, res) => {
         .json({ error: "DishList not found or access denied" });
     }
 
-    await prisma.dishList.update({
-      where: { id: dishListId },
-      data: { isPinned: true },
+    // Upsert the pin record for this user
+    await prisma.userDishListPin.upsert({
+      where: {
+        dishListId_userId: {
+          dishListId,
+          userId,
+        },
+      },
+      create: {
+        dishListId,
+        userId,
+      },
+      update: {}, // No update needed if already exists
     });
 
     res.json({ message: "DishList pinned successfully" });
@@ -416,6 +437,7 @@ router.delete("/:id/pin", authToken, async (req: AuthRequest, res) => {
     const dishListId = req.params.id;
     const userId = req.user!.uid;
 
+    // Verify user has access to this dishlist
     const dishList = await prisma.dishList.findFirst({
       where: {
         id: dishListId,
@@ -429,9 +451,12 @@ router.delete("/:id/pin", authToken, async (req: AuthRequest, res) => {
         .json({ error: "DishList not found or access denied" });
     }
 
-    await prisma.dishList.update({
-      where: { id: dishListId },
-      data: { isPinned: false },
+    // Delete the pin record for this user
+    await prisma.userDishListPin.deleteMany({
+      where: {
+        dishListId,
+        userId,
+      },
     });
 
     res.json({ message: "DishList unpinned successfully" });
@@ -619,8 +644,14 @@ router.post("/:id/share", authToken, async (req: AuthRequest, res) => {
     const { recipientIds } = req.body;
 
     // Validate recipientIds
-    if (!recipientIds || !Array.isArray(recipientIds) || recipientIds.length === 0) {
-      return res.status(400).json({ error: "At least one recipient is required" });
+    if (
+      !recipientIds ||
+      !Array.isArray(recipientIds) ||
+      recipientIds.length === 0
+    ) {
+      return res
+        .status(400)
+        .json({ error: "At least one recipient is required" });
     }
 
     // Get the DishList to verify it exists and is public
@@ -644,7 +675,9 @@ router.post("/:id/share", authToken, async (req: AuthRequest, res) => {
 
     // Only allow sharing public DishLists
     if (dishList.visibility !== "PUBLIC") {
-      return res.status(403).json({ error: "Only public DishLists can be shared" });
+      return res
+        .status(403)
+        .json({ error: "Only public DishLists can be shared" });
     }
 
     // Get sender info
@@ -707,10 +740,7 @@ router.get("/:id/collaborators", authToken, async (req: AuthRequest, res) => {
     const dishList = await prisma.dishList.findFirst({
       where: {
         id: dishListId,
-        OR: [
-          { ownerId: userId },
-          { collaborators: { some: { userId } } },
-        ],
+        OR: [{ ownerId: userId }, { collaborators: { some: { userId } } }],
       },
       include: {
         owner: {
@@ -726,7 +756,9 @@ router.get("/:id/collaborators", authToken, async (req: AuthRequest, res) => {
     });
 
     if (!dishList) {
-      return res.status(404).json({ error: "DishList not found or access denied" });
+      return res
+        .status(404)
+        .json({ error: "DishList not found or access denied" });
     }
 
     const isOwner = dishList.ownerId === userId;
@@ -819,7 +851,9 @@ router.delete(
       }
 
       if (dishList.ownerId !== userId) {
-        return res.status(403).json({ error: "Only the owner can remove collaborators" });
+        return res
+          .status(403)
+          .json({ error: "Only the owner can remove collaborators" });
       }
 
       // Delete the collaborator
@@ -865,7 +899,9 @@ router.delete(
       }
 
       if (dishList.ownerId !== userId) {
-        return res.status(403).json({ error: "Only the owner can revoke invites" });
+        return res
+          .status(403)
+          .json({ error: "Only the owner can revoke invites" });
       }
 
       // Get invite to find the invitee for notification cleanup
@@ -929,7 +965,9 @@ router.post(
       }
 
       if (dishList.ownerId !== userId) {
-        return res.status(403).json({ error: "Only the owner can resend invites" });
+        return res
+          .status(403)
+          .json({ error: "Only the owner can resend invites" });
       }
 
       // Get invite

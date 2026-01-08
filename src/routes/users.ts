@@ -290,6 +290,10 @@ router.get("/:userId", authToken, async (req: AuthRequest, res) => {
           followers: {
             where: { userId: currentUserId },
           },
+          pins: {
+            where: { userId: currentUserId },
+            select: { userId: true },
+          },
         },
         orderBy: { createdAt: "desc" },
       });
@@ -320,6 +324,10 @@ router.get("/:userId", authToken, async (req: AuthRequest, res) => {
           },
           followers: {
             where: { userId: currentUserId },
+          },
+          pins: {
+            where: { userId: currentUserId },
+            select: { userId: true },
           },
         },
         orderBy: { createdAt: "desc" },
@@ -383,7 +391,7 @@ router.get("/:userId", authToken, async (req: AuthRequest, res) => {
         description: d.description,
         visibility: d.visibility,
         isDefault: d.isDefault,
-        isPinned: d.isPinned,
+        isPinned: d.pins.length > 0,
         recipeCount: d._count.recipes,
         followerCount: d._count.followers,
         isOwner: d.ownerId === currentUserId,
