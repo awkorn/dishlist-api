@@ -96,6 +96,139 @@ router.get("/me", authToken, async (req: AuthRequest, res) => {
   }
 });
 
+// Update current user's profile
+router.put("/me", authToken, async (req: AuthRequest, res) => {
+  try {
+    const { username, firstName, lastName, bio, avatarUrl } = req.body;
+    const userId = req.user!.uid;
+
+    // Validate required fields if provided
+    if (username !== undefined && !username?.trim()) {
+      return res.status(400).json({ error: "Username cannot be empty" });
+    }
+
+    if (firstName !== undefined && !firstName?.trim()) {
+      return res.status(400).json({ error: "First name cannot be empty" });
+    }
+
+    // If username is being changed, check if it's available
+    if (username) {
+      const existingUser = await prisma.user.findUnique({
+        where: { username },
+      });
+
+      if (existingUser && existingUser.uid !== userId) {
+        return res.status(400).json({ error: "Username already taken" });
+      }
+    }
+
+    const updateData: Record<string, any> = {
+      updatedAt: new Date(),
+    };
+
+    // Required fields - only update if provided and non-empty
+    if (username !== undefined) {
+      updateData.username = username.trim();
+    }
+    if (firstName !== undefined) {
+      updateData.firstName = firstName.trim();
+    }
+
+    // Optional fields - can be set to null to clear
+    if (lastName !== undefined) {
+      updateData.lastName = lastName === null ? null : lastName.trim() || null;
+    }
+    if (bio !== undefined) {
+      updateData.bio = bio === null ? null : bio.trim() || null;
+    }
+    if (avatarUrl !== undefined) {
+      updateData.avatarUrl = avatarUrl === null ? null : avatarUrl;
+    }
+
+    const updatedUser = await prisma.user.update({
+      where: { uid: userId },
+      data: updateData,
+      include: {
+        _count: {
+          select: {
+            followers: true,
+            following: true,
+          },
+        },
+      },
+    });
+
+    res.json({ user: updatedUser });
+  } catch (error) {
+    console.error("Update user profile error:", error);
+    res.status(500).json({ error: "Failed to update profile" });
+  }
+});
+
+// Get user's mutuals (users you follow who also follow you back)
+router.get("/mutuals", authToken, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.user!.uid;
+    const { search } = req.query;
+
+    // Find users where:
+    // 1. Current user follows them (they are in user's "following" list)
+    // 2. They follow current user back (user is in their "following" list)
+    const mutuals = await prisma.user.findMany({
+      where: {
+        AND: [
+          // I follow them
+          {
+            followers: {
+              some: {
+                followerId: userId,
+              },
+            },
+          },
+          // They follow me
+          {
+            following: {
+              some: {
+                followingId: userId,
+              },
+            },
+          },
+          // Optional search filter
+          ...(search
+            ? [
+                {
+                  OR: [
+                    { username: { contains: search as string, mode: "insensitive" as const } },
+                    { firstName: { contains: search as string, mode: "insensitive" as const } },
+                    { lastName: { contains: search as string, mode: "insensitive" as const } },
+                  ],
+                },
+              ]
+            : []),
+        ],
+      },
+      select: {
+        uid: true,
+        username: true,
+        firstName: true,
+        lastName: true,
+        avatarUrl: true,
+      },
+      orderBy: [
+        { firstName: "asc" },
+        { lastName: "asc" },
+        { username: "asc" },
+      ],
+    });
+
+    res.json({ mutuals });
+  } catch (error) {
+    console.error("Get mutuals error:", error);
+    res.status(500).json({ error: "Failed to fetch mutuals" });
+  }
+});
+
+
 // Get any user's profile by userId
 router.get("/:userId", authToken, async (req: AuthRequest, res) => {
   try {
@@ -276,143 +409,8 @@ router.get("/:userId", authToken, async (req: AuthRequest, res) => {
   }
 });
 
-// Update current user's profile
-router.put("/me", authToken, async (req: AuthRequest, res) => {
-  try {
-    const { username, firstName, lastName, bio, avatarUrl } = req.body;
-    const userId = req.user!.uid;
 
-    // Validate required fields if provided
-    if (username !== undefined && !username?.trim()) {
-      return res.status(400).json({ error: "Username cannot be empty" });
-    }
-
-    if (firstName !== undefined && !firstName?.trim()) {
-      return res.status(400).json({ error: "First name cannot be empty" });
-    }
-
-    // If username is being changed, check if it's available
-    if (username) {
-      const existingUser = await prisma.user.findUnique({
-        where: { username },
-      });
-
-      if (existingUser && existingUser.uid !== userId) {
-        return res.status(400).json({ error: "Username already taken" });
-      }
-    }
-
-    const updateData: Record<string, any> = {
-      updatedAt: new Date(),
-    };
-
-    // Required fields - only update if provided and non-empty
-    if (username !== undefined) {
-      updateData.username = username.trim();
-    }
-    if (firstName !== undefined) {
-      updateData.firstName = firstName.trim();
-    }
-
-    // Optional fields - can be set to null to clear
-    if (lastName !== undefined) {
-      updateData.lastName = lastName === null ? null : lastName.trim() || null;
-    }
-    if (bio !== undefined) {
-      updateData.bio = bio === null ? null : bio.trim() || null;
-    }
-    if (avatarUrl !== undefined) {
-      updateData.avatarUrl = avatarUrl === null ? null : avatarUrl;
-    }
-
-    const updatedUser = await prisma.user.update({
-      where: { uid: userId },
-      data: updateData,
-      include: {
-        _count: {
-          select: {
-            followers: true,
-            following: true,
-          },
-        },
-      },
-    });
-
-    res.json({ user: updatedUser });
-  } catch (error) {
-    console.error("Update user profile error:", error);
-    res.status(500).json({ error: "Failed to update profile" });
-  }
-});
-
-// Get user's mutuals (users you follow who also follow you back)
-router.get("/mutuals", authToken, async (req: AuthRequest, res) => {
-  try {
-    const userId = req.user!.uid;
-    const { search } = req.query;
-
-    // Find users where:
-    // 1. Current user follows them (they are in user's "following" list)
-    // 2. They follow current user back (user is in their "following" list)
-    const mutuals = await prisma.user.findMany({
-      where: {
-        AND: [
-          // I follow them
-          {
-            followers: {
-              some: {
-                followerId: userId,
-              },
-            },
-          },
-          // They follow me
-          {
-            following: {
-              some: {
-                followingId: userId,
-              },
-            },
-          },
-          // Optional search filter
-          ...(search
-            ? [
-                {
-                  OR: [
-                    { username: { contains: search as string, mode: "insensitive" as const } },
-                    { firstName: { contains: search as string, mode: "insensitive" as const } },
-                    { lastName: { contains: search as string, mode: "insensitive" as const } },
-                  ],
-                },
-              ]
-            : []),
-        ],
-      },
-      select: {
-        uid: true,
-        username: true,
-        firstName: true,
-        lastName: true,
-        avatarUrl: true,
-      },
-      orderBy: [
-        { firstName: "asc" },
-        { lastName: "asc" },
-        { username: "asc" },
-      ],
-    });
-
-    res.json({ mutuals });
-  } catch (error) {
-    console.error("Get mutuals error:", error);
-    res.status(500).json({ error: "Failed to fetch mutuals" });
-  }
-});
-
-
-// ============================================
-// POST /:id/follow
 // Follow a user
-// ============================================
 router.post("/:id/follow", authToken, async (req: AuthRequest, res) => {
   try {
     const targetUserId = req.params.id;
@@ -452,7 +450,8 @@ router.post("/:id/follow", authToken, async (req: AuthRequest, res) => {
       select: { username: true, firstName: true, lastName: true },
     });
 
-    const followerName = currentUser?.firstName || currentUser?.username || "Someone";
+    const followerName =
+      currentUser?.firstName || currentUser?.username || "Someone";
 
     // Create follow relationship and notification in transaction
     await prisma.$transaction(async (tx) => {
@@ -486,10 +485,8 @@ router.post("/:id/follow", authToken, async (req: AuthRequest, res) => {
   }
 });
 
-// ============================================
-// DELETE /:id/follow
+
 // Unfollow a user
-// ============================================
 router.delete("/:id/follow", authToken, async (req: AuthRequest, res) => {
   try {
     const targetUserId = req.params.id;
