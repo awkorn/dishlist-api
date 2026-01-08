@@ -198,9 +198,24 @@ router.get("/mutuals", authToken, async (req: AuthRequest, res) => {
             ? [
                 {
                   OR: [
-                    { username: { contains: search as string, mode: "insensitive" as const } },
-                    { firstName: { contains: search as string, mode: "insensitive" as const } },
-                    { lastName: { contains: search as string, mode: "insensitive" as const } },
+                    {
+                      username: {
+                        contains: search as string,
+                        mode: "insensitive" as const,
+                      },
+                    },
+                    {
+                      firstName: {
+                        contains: search as string,
+                        mode: "insensitive" as const,
+                      },
+                    },
+                    {
+                      lastName: {
+                        contains: search as string,
+                        mode: "insensitive" as const,
+                      },
+                    },
                   ],
                 },
               ]
@@ -214,11 +229,7 @@ router.get("/mutuals", authToken, async (req: AuthRequest, res) => {
         lastName: true,
         avatarUrl: true,
       },
-      orderBy: [
-        { firstName: "asc" },
-        { lastName: "asc" },
-        { username: "asc" },
-      ],
+      orderBy: [{ firstName: "asc" }, { lastName: "asc" }, { username: "asc" }],
     });
 
     res.json({ mutuals });
@@ -227,7 +238,6 @@ router.get("/mutuals", authToken, async (req: AuthRequest, res) => {
     res.status(500).json({ error: "Failed to fetch mutuals" });
   }
 });
-
 
 // Get any user's profile by userId
 router.get("/:userId", authToken, async (req: AuthRequest, res) => {
@@ -316,50 +326,32 @@ router.get("/:userId", authToken, async (req: AuthRequest, res) => {
       });
     }
 
-    // Get recipes based on ownership
-    let recipes;
-    if (userId === currentUserId) {
-      // Own profile: Show ALL recipes user created
-      recipes = await prisma.recipe.findMany({
-        where: {
-          creatorId: userId,
-        },
-        include: {
-          creator: {
-            select: {
-              uid: true,
-              username: true,
-              firstName: true,
-              lastName: true,
+    // Get recipes from user's dishlists (owned + collaborated)
+    const dishlistIds = dishlists.map((d) => d.id);
+
+    const recipes =
+      dishlistIds.length > 0
+        ? await prisma.recipe.findMany({
+            where: {
+              dishLists: {
+                some: {
+                  dishListId: { in: dishlistIds },
+                },
+              },
             },
-          },
-        },
-        orderBy: { createdAt: "desc" },
-      });
-    } else {
-      // Other user's profile: Show recipes only from their public dishlists
-      const dishlistIds = dishlists.map((d) => d.id);
-      recipes = await prisma.recipe.findMany({
-        where: {
-          dishLists: {
-            some: {
-              dishListId: { in: dishlistIds },
+            include: {
+              creator: {
+                select: {
+                  uid: true,
+                  username: true,
+                  firstName: true,
+                  lastName: true,
+                },
+              },
             },
-          },
-        },
-        include: {
-          creator: {
-            select: {
-              uid: true,
-              username: true,
-              firstName: true,
-              lastName: true,
-            },
-          },
-        },
-        orderBy: { createdAt: "desc" },
-      });
-    }
+            orderBy: { createdAt: "desc" },
+          })
+        : [];
 
     // Check if current user is following this profile
     const isFollowing = await prisma.userFollow.findUnique({
@@ -408,7 +400,6 @@ router.get("/:userId", authToken, async (req: AuthRequest, res) => {
     res.status(500).json({ error: "Failed to fetch user profile" });
   }
 });
-
 
 // Follow a user
 router.post("/:id/follow", authToken, async (req: AuthRequest, res) => {
@@ -484,7 +475,6 @@ router.post("/:id/follow", authToken, async (req: AuthRequest, res) => {
     res.status(500).json({ error: "Failed to follow user" });
   }
 });
-
 
 // Unfollow a user
 router.delete("/:id/follow", authToken, async (req: AuthRequest, res) => {
