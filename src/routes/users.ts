@@ -408,4 +408,111 @@ router.get("/mutuals", authToken, async (req: AuthRequest, res) => {
   }
 });
 
+
+// ============================================
+// POST /:id/follow
+// Follow a user
+// ============================================
+router.post("/:id/follow", authToken, async (req: AuthRequest, res) => {
+  try {
+    const targetUserId = req.params.id;
+    const currentUserId = req.user!.uid;
+
+    // Can't follow yourself
+    if (targetUserId === currentUserId) {
+      return res.status(400).json({ error: "Cannot follow yourself" });
+    }
+
+    // Check if target user exists
+    const targetUser = await prisma.user.findUnique({
+      where: { uid: targetUserId },
+    });
+
+    if (!targetUser) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Check if already following
+    const existingFollow = await prisma.userFollow.findUnique({
+      where: {
+        followerId_followingId: {
+          followerId: currentUserId,
+          followingId: targetUserId,
+        },
+      },
+    });
+
+    if (existingFollow) {
+      return res.status(400).json({ error: "Already following this user" });
+    }
+
+    // Get current user for notification
+    const currentUser = await prisma.user.findUnique({
+      where: { uid: currentUserId },
+      select: { username: true, firstName: true, lastName: true },
+    });
+
+    const followerName = currentUser?.firstName || currentUser?.username || "Someone";
+
+    // Create follow relationship and notification in transaction
+    await prisma.$transaction(async (tx) => {
+      await tx.userFollow.create({
+        data: {
+          followerId: currentUserId,
+          followingId: targetUserId,
+        },
+      });
+
+      // Create notification for the followed user
+      await tx.notification.create({
+        data: {
+          type: "USER_FOLLOWED",
+          title: `${followerName} started following you`,
+          message: "You have a new follower",
+          senderId: currentUserId,
+          receiverId: targetUserId,
+          data: JSON.stringify({
+            odUserId: currentUserId,
+            followerName,
+          }),
+        },
+      });
+    });
+
+    res.json({ success: true, message: "Successfully followed user" });
+  } catch (error) {
+    console.error("Follow user error:", error);
+    res.status(500).json({ error: "Failed to follow user" });
+  }
+});
+
+// ============================================
+// DELETE /:id/follow
+// Unfollow a user
+// ============================================
+router.delete("/:id/follow", authToken, async (req: AuthRequest, res) => {
+  try {
+    const targetUserId = req.params.id;
+    const currentUserId = req.user!.uid;
+
+    // Can't unfollow yourself
+    if (targetUserId === currentUserId) {
+      return res.status(400).json({ error: "Cannot unfollow yourself" });
+    }
+
+    // Delete follow relationship (will silently succeed even if not following)
+    await prisma.userFollow.deleteMany({
+      where: {
+        followerId: currentUserId,
+        followingId: targetUserId,
+      },
+    });
+
+    res.json({ success: true, message: "Successfully unfollowed user" });
+  } catch (error) {
+    console.error("Unfollow user error:", error);
+    res.status(500).json({ error: "Failed to unfollow user" });
+  }
+});
+
 export default router;
