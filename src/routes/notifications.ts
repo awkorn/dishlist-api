@@ -280,4 +280,172 @@ router.post("/:id/decline-invitation", authToken, async (req: AuthRequest, res) 
   }
 });
 
+// POST /notifications/:id/accept-follow - Accept follow request
+router.post("/:id/accept-follow", authToken, async (req: AuthRequest, res) => {
+  try {
+    const notificationId = req.params.id;
+    const userId = req.user!.uid;
+
+    // Get the notification and verify it's a follow request for this user
+    const notification = await prisma.notification.findFirst({
+      where: {
+        id: notificationId,
+        receiverId: userId,
+        type: "FOLLOW_REQUEST",
+      },
+    });
+
+    if (!notification) {
+      return res.status(404).json({ error: "Follow request not found" });
+    }
+
+    const requesterId = notification.senderId;
+    if (!requesterId) {
+      return res.status(400).json({ error: "Invalid follow request" });
+    }
+
+    // Find the pending follow relationship
+    const followRelation = await prisma.userFollow.findUnique({
+      where: {
+        followerId_followingId: {
+          followerId: requesterId,
+          followingId: userId,
+        },
+      },
+    });
+
+    if (!followRelation) {
+      // Follow request was cancelled
+      await prisma.notification.delete({ where: { id: notificationId } });
+      return res.status(404).json({ error: "Follow request no longer exists" });
+    }
+
+    if (followRelation.status === "ACCEPTED") {
+      return res.status(400).json({ error: "Already following" });
+    }
+
+    // Get accepting user info for notification
+    const acceptingUser = await prisma.user.findUnique({
+      where: { uid: userId },
+      select: { username: true, firstName: true, avatarUrl: true },
+    });
+
+    const accepterName = acceptingUser?.firstName || acceptingUser?.username || "Someone";
+
+    // Update follow to accepted and send notification
+    await prisma.$transaction(async (tx) => {
+      // Update follow status
+      await tx.userFollow.update({
+        where: { id: followRelation.id },
+        data: {
+          status: "ACCEPTED",
+          acceptedAt: new Date(),
+        },
+      });
+
+      // Delete the follow request notification
+      await tx.notification.delete({
+        where: { id: notificationId },
+      });
+
+      // Send acceptance notification to requester
+      await tx.notification.create({
+        data: {
+          type: "FOLLOW_ACCEPTED",
+          title: `${accepterName} accepted your follow request`,
+          message: "You are now following them",
+          senderId: userId,
+          receiverId: requesterId,
+          data: JSON.stringify({
+            userId,
+            userName: accepterName,
+            avatarUrl: acceptingUser?.avatarUrl || null,
+          }),
+        },
+      });
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Accept follow error:", error);
+    res.status(500).json({ error: "Failed to accept follow request" });
+  }
+});
+
+// POST /notifications/:id/decline-follow - Decline follow request (silent)
+router.post("/:id/decline-follow", authToken, async (req: AuthRequest, res) => {
+  try {
+    const notificationId = req.params.id;
+    const userId = req.user!.uid;
+
+    // Get the notification and verify it's a follow request for this user
+    const notification = await prisma.notification.findFirst({
+      where: {
+        id: notificationId,
+        receiverId: userId,
+        type: "FOLLOW_REQUEST",
+      },
+    });
+
+    if (!notification) {
+      return res.status(404).json({ error: "Follow request not found" });
+    }
+
+    const requesterId = notification.senderId;
+
+    // Delete both the follow relationship and notification silently
+    await prisma.$transaction(async (tx) => {
+      // Delete pending follow relationship if exists
+      if (requesterId) {
+        await tx.userFollow.deleteMany({
+          where: {
+            followerId: requesterId,
+            followingId: userId,
+            status: "PENDING",
+          },
+        });
+      }
+
+      // Delete the notification
+      await tx.notification.delete({
+        where: { id: notificationId },
+      });
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Decline follow error:", error);
+    res.status(500).json({ error: "Failed to decline follow request" });
+  }
+});
+
+// UPDATE: Get notifications - include sender avatar
+router.get("/", authToken, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.user!.uid;
+
+    const notifications = await prisma.notification.findMany({
+      where: { receiverId: userId },
+      include: {
+        sender: {
+          select: {
+            uid: true,
+            username: true,
+            firstName: true,
+            lastName: true,
+            avatarUrl: true, // Include avatar
+          },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+    });
+
+    res.json({ notifications });
+  } catch (error) {
+    console.error("Get notifications error:", error);
+    res.status(500).json({ error: "Failed to fetch notifications" });
+  }
+});
+
 export default router;

@@ -185,8 +185,10 @@ model DishListInvite {
 }
 
 model UserFollow {
-  id         String   @id @default(cuid())
-  followedAt DateTime @default(now())
+  id         String       @id @default(cuid())
+  status     FollowStatus @default(PENDING)  
+  followedAt DateTime     @default(now())
+  acceptedAt DateTime?                       
 
   // Relations
   followerId String
@@ -196,6 +198,7 @@ model UserFollow {
   following   User   @relation("UserFollowers", fields: [followingId], references: [uid], onDelete: Cascade)
 
   @@unique([followerId, followingId])
+  @@index([followingId, status]) 
   @@map("UserFollow")
 }
 
@@ -232,6 +235,13 @@ enum NotificationType {
   DISHLIST_FOLLOWED
   COLLABORATION_ACCEPTED
   COLLABORATION_DECLINED
-  USER_FOLLOWED
+  USER_FOLLOWED       
+  FOLLOW_REQUEST         
+  FOLLOW_ACCEPTED        
   SYSTEM_UPDATE
+}
+
+enum FollowStatus {
+  PENDING
+  ACCEPTED
 }
