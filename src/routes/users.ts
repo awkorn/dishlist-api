@@ -362,15 +362,24 @@ router.get("/:userId", authToken, async (req: AuthRequest, res) => {
         : [];
 
     // Check if current user is following this profile
-    const isFollowing = await prisma.userFollow.findUnique({
-      where: {
-        followerId_followingId: {
-          followerId: currentUserId,
-          followingId: userId,
-        },
-      },
-    });
+    let followStatus: "NONE" | "PENDING" | "ACCEPTED" = "NONE";
+    let isFollowing = false;
 
+    if (userId !== currentUserId) {
+      const followRelation = await prisma.userFollow.findUnique({
+        where: {
+          followerId_followingId: {
+            followerId: currentUserId,
+            followingId: userId,
+          },
+        },
+      });
+
+      if (followRelation) {
+        followStatus = followRelation.status;
+        isFollowing = followRelation.status === "ACCEPTED";
+      }
+    }
     res.json({
       user: {
         uid: user.uid,
@@ -382,8 +391,9 @@ router.get("/:userId", authToken, async (req: AuthRequest, res) => {
         avatarUrl: user.avatarUrl,
         followerCount: user._count.followers,
         followingCount: user._count.following,
-        isFollowing: !!isFollowing,
+        isFollowing,
         isOwnProfile: userId === currentUserId,
+        followStatus, 
       },
       dishlists: dishlists.map((d) => ({
         id: d.id,
@@ -448,16 +458,21 @@ router.post("/:id/follow", authToken, async (req: AuthRequest, res) => {
         return res.status(400).json({ error: "Already following this user" });
       }
       // Already pending
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: "Follow request already sent",
-        status: "PENDING" 
+        status: "PENDING",
       });
     }
 
     // Get current user for notification
     const currentUser = await prisma.user.findUnique({
       where: { uid: currentUserId },
-      select: { username: true, firstName: true, lastName: true, avatarUrl: true },
+      select: {
+        username: true,
+        firstName: true,
+        lastName: true,
+        avatarUrl: true,
+      },
     });
 
     const followerName =
@@ -490,10 +505,10 @@ router.post("/:id/follow", authToken, async (req: AuthRequest, res) => {
       });
     });
 
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       message: "Follow request sent",
-      status: "PENDING"
+      status: "PENDING",
     });
   } catch (error) {
     console.error("Follow user error:", error);
@@ -546,9 +561,11 @@ router.delete("/:id/follow", authToken, async (req: AuthRequest, res) => {
       }
     });
 
-    res.json({ 
-      success: true, 
-      message: wasPending ? "Follow request cancelled" : "Successfully unfollowed user" 
+    res.json({
+      success: true,
+      message: wasPending
+        ? "Follow request cancelled"
+        : "Successfully unfollowed user",
     });
   } catch (error) {
     console.error("Unfollow user error:", error);
