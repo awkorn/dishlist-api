@@ -78,8 +78,8 @@ router.get("/me", authToken, async (req: AuthRequest, res) => {
         },
         _count: {
           select: {
-            followers: true,
-            following: true,
+            followers: { where: { status: "ACCEPTED" } },
+            following: { where: { status: "ACCEPTED" } },
           },
         },
       },
@@ -151,8 +151,8 @@ router.put("/me", authToken, async (req: AuthRequest, res) => {
       include: {
         _count: {
           select: {
-            followers: true,
-            following: true,
+            followers: { where: { status: "ACCEPTED" } },
+            following: { where: { status: "ACCEPTED" } },
           },
         },
       },
@@ -250,8 +250,8 @@ router.get("/:userId", authToken, async (req: AuthRequest, res) => {
       include: {
         _count: {
           select: {
-            followers: true,
-            following: true,
+            followers: { where: { status: "ACCEPTED" } },
+            following: { where: { status: "ACCEPTED" } },
           },
         },
       },
@@ -393,7 +393,7 @@ router.get("/:userId", authToken, async (req: AuthRequest, res) => {
         followingCount: user._count.following,
         isFollowing,
         isOwnProfile: userId === currentUserId,
-        followStatus, 
+        followStatus,
       },
       dishlists: dishlists.map((d) => ({
         id: d.id,
@@ -643,6 +643,129 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
   } catch (error) {
     console.error("Get user error:", error);
     res.status(500).json({ error: "Failed to fetch user" });
+  }
+});
+
+// GET /:userId/followers - Get list of users who follow this user
+router.get("/:userId/followers", authToken, async (req: AuthRequest, res) => {
+  try {
+    const { userId } = req.params;
+    const currentUserId = req.user!.uid;
+
+    // Check user exists
+    const targetUser = await prisma.user.findUnique({
+      where: { uid: userId },
+    });
+
+    if (!targetUser) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Get all accepted followers of this user
+    const followers = await prisma.userFollow.findMany({
+      where: {
+        followingId: userId,
+        status: "ACCEPTED",
+      },
+      include: {
+        follower: {
+          select: {
+            uid: true,
+            username: true,
+            firstName: true,
+            lastName: true,
+            avatarUrl: true,
+          },
+        },
+      },
+      orderBy: { acceptedAt: "desc" },
+    });
+
+    // For each follower, check if current user follows them back
+    const followerIds = followers.map((f) => f.followerId);
+
+    // Get current user's follow relationships with these followers
+    const currentUserFollows = await prisma.userFollow.findMany({
+      where: {
+        followerId: currentUserId,
+        followingId: { in: followerIds },
+      },
+      select: {
+        followingId: true,
+        status: true,
+      },
+    });
+
+    // Create a map for quick lookup
+    const followStatusMap = new Map(
+      currentUserFollows.map((f) => [f.followingId, f.status]),
+    );
+
+    // Transform data
+    const result = followers.map((f) => ({
+      uid: f.follower.uid,
+      username: f.follower.username,
+      firstName: f.follower.firstName,
+      lastName: f.follower.lastName,
+      avatarUrl: f.follower.avatarUrl,
+      // What is current user's follow status toward this follower?
+      followStatus: followStatusMap.get(f.followerId) || "NONE",
+    }));
+
+    res.json({ users: result });
+  } catch (error) {
+    console.error("Get followers error:", error);
+    res.status(500).json({ error: "Failed to fetch followers" });
+  }
+});
+
+// GET /:userId/following - Get list of users this user follows
+router.get("/:userId/following", authToken, async (req: AuthRequest, res) => {
+  try {
+    const { userId } = req.params;
+
+    // Check user exists
+    const targetUser = await prisma.user.findUnique({
+      where: { uid: userId },
+    });
+
+    if (!targetUser) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Get all users this person follows (accepted only)
+    const following = await prisma.userFollow.findMany({
+      where: {
+        followerId: userId,
+        status: "ACCEPTED",
+      },
+      include: {
+        following: {
+          select: {
+            uid: true,
+            username: true,
+            firstName: true,
+            lastName: true,
+            avatarUrl: true,
+          },
+        },
+      },
+      orderBy: { acceptedAt: "desc" },
+    });
+
+    // Transform data
+    const result = following.map((f) => ({
+      uid: f.following.uid,
+      username: f.following.username,
+      firstName: f.following.firstName,
+      lastName: f.following.lastName,
+      avatarUrl: f.following.avatarUrl,
+    }));
+
+    res.json({ users: result });
+  } catch (error) {
+    console.error("Get following error:", error);
+    res.status(500).json({ error: "Failed to fetch following" });
   }
 });
 
