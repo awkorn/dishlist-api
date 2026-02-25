@@ -72,10 +72,6 @@ router.get("/me", authToken, async (req: AuthRequest, res) => {
     const user = await prisma.user.findUnique({
       where: { uid: req.user!.uid },
       include: {
-        ownedDishLists: {
-          where: { isDefault: false },
-          orderBy: { createdAt: "desc" },
-        },
         _count: {
           select: {
             followers: { where: { status: "ACCEPTED" } },
@@ -244,6 +240,16 @@ router.get("/:userId", authToken, async (req: AuthRequest, res) => {
   try {
     const { userId } = req.params;
     const currentUserId = req.user!.uid;
+    const includeRecipes = req.query.includeRecipes === "true";
+    const includeDishlists = req.query.includeDishlists !== "false";
+    const recipesLimitRaw = Number(req.query.recipesLimit ?? 20);
+    const recipesOffsetRaw = Number(req.query.recipesOffset ?? 0);
+    const recipesLimit = Number.isFinite(recipesLimitRaw)
+      ? Math.min(Math.max(recipesLimitRaw, 1), 100)
+      : 20;
+    const recipesOffset = Number.isFinite(recipesOffsetRaw)
+      ? Math.max(recipesOffsetRaw, 0)
+      : 0;
 
     const user = await prisma.user.findUnique({
       where: { uid: userId },
@@ -261,84 +267,64 @@ router.get("/:userId", authToken, async (req: AuthRequest, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
-    // Get dishlists based on ownership
-    let dishlists;
-    if (userId === currentUserId) {
-      // Own profile: Show ALL dishlists (public + private, owned + collaborated)
-      dishlists = await prisma.dishList.findMany({
-        where: {
-          OR: [{ ownerId: userId }, { collaborators: { some: { userId } } }],
-        },
-        include: {
-          owner: {
-            select: {
-              uid: true,
-              username: true,
-              firstName: true,
-              lastName: true,
-            },
-          },
-          _count: {
-            select: {
-              recipes: true,
-              followers: true,
-            },
-          },
-          collaborators: {
-            where: { userId: currentUserId },
-          },
-          followers: {
-            where: { userId: currentUserId },
-          },
-          pins: {
-            where: { userId: currentUserId },
-            select: { userId: true },
-          },
-        },
-        orderBy: { createdAt: "desc" },
-      });
-    } else {
-      // Other user's profile: Show only public dishlists (owned + collaborated)
-      dishlists = await prisma.dishList.findMany({
-        where: {
-          visibility: "PUBLIC",
-          OR: [{ ownerId: userId }, { collaborators: { some: { userId } } }],
-        },
-        include: {
-          owner: {
-            select: {
-              uid: true,
-              username: true,
-              firstName: true,
-              lastName: true,
-            },
-          },
-          _count: {
-            select: {
-              recipes: true,
-              followers: true,
-            },
-          },
-          collaborators: {
-            where: { userId: currentUserId },
-          },
-          followers: {
-            where: { userId: currentUserId },
-          },
-          pins: {
-            where: { userId: currentUserId },
-            select: { userId: true },
-          },
-        },
-        orderBy: { createdAt: "desc" },
-      });
-    }
+    const dishListWhere =
+      userId === currentUserId
+        ? {
+            OR: [{ ownerId: userId }, { collaborators: { some: { userId } } }],
+          }
+        : {
+            visibility: "PUBLIC" as const,
+            OR: [{ ownerId: userId }, { collaborators: { some: { userId } } }],
+          };
 
-    // Get recipes from user's dishlists (owned + collaborated)
-    const dishlistIds = dishlists.map((d) => d.id);
+    // Fetch full dishlist payload only when needed by the client
+    const dishlists = includeDishlists
+      ? await prisma.dishList.findMany({
+          where: dishListWhere,
+          include: {
+            owner: {
+              select: {
+                uid: true,
+                username: true,
+                firstName: true,
+                lastName: true,
+              },
+            },
+            _count: {
+              select: {
+                recipes: true,
+                followers: true,
+              },
+            },
+            collaborators: {
+              where: { userId: currentUserId },
+            },
+            followers: {
+              where: { userId: currentUserId },
+            },
+            pins: {
+              where: { userId: currentUserId },
+              select: { userId: true },
+            },
+          },
+          orderBy: { createdAt: "desc" },
+        })
+      : [];
+
+    const dishlistIds =
+      includeDishlists
+        ? dishlists.map((d) => d.id)
+        : includeRecipes
+          ? (
+              await prisma.dishList.findMany({
+                where: dishListWhere,
+                select: { id: true },
+              })
+            ).map((d) => d.id)
+          : [];
 
     const recipes =
-      dishlistIds.length > 0
+      includeRecipes && dishlistIds.length > 0
         ? await prisma.recipe.findMany({
             where: {
               dishLists: {
@@ -358,6 +344,8 @@ router.get("/:userId", authToken, async (req: AuthRequest, res) => {
               },
             },
             orderBy: { createdAt: "desc" },
+            skip: recipesOffset,
+            take: recipesLimit,
           })
         : [];
 
@@ -395,23 +383,34 @@ router.get("/:userId", authToken, async (req: AuthRequest, res) => {
         isOwnProfile: userId === currentUserId,
         followStatus,
       },
-      dishlists: dishlists.map((d) => ({
-        id: d.id,
-        title: d.title,
-        description: d.description,
-        visibility: d.visibility,
-        isDefault: d.isDefault,
-        isPinned: d.pins.length > 0,
-        recipeCount: d._count.recipes,
-        followerCount: d._count.followers,
-        isOwner: d.ownerId === currentUserId,
-        isCollaborator: d.collaborators.length > 0,
-        isFollowing: d.followers.length > 0,
-        owner: d.owner,
-        createdAt: d.createdAt,
-        updatedAt: d.updatedAt,
-      })),
+      dishlists: includeDishlists
+        ? dishlists.map((d) => ({
+            id: d.id,
+            title: d.title,
+            description: d.description,
+            visibility: d.visibility,
+            isDefault: d.isDefault,
+            isPinned: d.pins.length > 0,
+            recipeCount: d._count.recipes,
+            followerCount: d._count.followers,
+            isOwner: d.ownerId === currentUserId,
+            isCollaborator: d.collaborators.length > 0,
+            isFollowing: d.followers.length > 0,
+            owner: d.owner,
+            createdAt: d.createdAt,
+            updatedAt: d.updatedAt,
+          }))
+        : [],
       recipes,
+      recipesMeta: {
+        included: includeRecipes,
+        limit: recipesLimit,
+        offset: recipesOffset,
+        hasMore: includeRecipes ? recipes.length === recipesLimit : false,
+      },
+      dishlistsMeta: {
+        included: includeDishlists,
+      },
     });
   } catch (error) {
     console.error("Get user profile error:", error);
