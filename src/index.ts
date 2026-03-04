@@ -8,7 +8,6 @@ import nutritionRouter from "./routes/nutrition";
 import notificationsRouter from "./routes/notifications";
 import invitesRouter from "./routes/invites";
 import searchRouter from "./routes/search";
-import "./lib/firebase";
 
 if (!process.env.OPENAI_API_KEY) {
   throw new Error('Missing OPENAI_API_KEY environment variable');

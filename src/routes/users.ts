@@ -8,7 +8,7 @@ const router = Router();
 router.post("/register", authToken, async (req: AuthRequest, res) => {
   try {
     const { email, username, firstName, lastName, bio } = req.body;
-    const firebaseUid = req.user!.uid;
+    const userId = req.user!.uid;
 
     // Build update object conditionally
     const updateData: any = {
@@ -24,7 +24,7 @@ router.post("/register", authToken, async (req: AuthRequest, res) => {
 
     // Create object for new users
     const createData = {
-      uid: firebaseUid,
+      uid: userId,
       email,
       username: username || null,
       firstName: firstName || null,
@@ -34,7 +34,7 @@ router.post("/register", authToken, async (req: AuthRequest, res) => {
 
     // Create or update user in your database
     const user = await prisma.user.upsert({
-      where: { uid: firebaseUid },
+      where: { uid: userId },
       update: updateData,
       create: createData,
     });
