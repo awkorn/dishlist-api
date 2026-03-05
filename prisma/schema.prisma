@@ -107,8 +107,8 @@ model DishListRecipe {
   recipe   Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
 
   // Who added this recipe to the dish list
-  addedById String
-  addedBy   User   @relation("UserAddedRecipes", fields: [addedById], references: [uid])
+  addedById String?
+  addedBy   User?   @relation("UserAddedRecipes", fields: [addedById], references: [uid], onDelete: SetNull)
 
   @@unique([dishListId, recipeId])
   @@map("DishListRecipe")

@@ -1,5 +1,6 @@
 import { Router } from "express";
 import prisma from "../lib/prisma";
+import { supabaseAdmin } from "../lib/supabase";
 import { authToken, AuthRequest } from "../middleware/auth";
 
 const router = Router();
@@ -158,6 +159,40 @@ router.put("/me", authToken, async (req: AuthRequest, res) => {
   } catch (error) {
     console.error("Update user profile error:", error);
     res.status(500).json({ error: "Failed to update profile" });
+  }
+});
+
+// Delete current user's account and all associated data
+router.delete("/me", authToken, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.user!.uid;
+
+    // Verify user exists
+    const user = await prisma.user.findUnique({
+      where: { uid: userId },
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Delete user from database (cascades handle related data)
+    await prisma.user.delete({
+      where: { uid: userId },
+    });
+
+    // Delete user from Supabase Auth
+    const { error: authError } = await supabaseAdmin.auth.admin.deleteUser(userId);
+
+    if (authError) {
+      console.error("Failed to delete Supabase Auth user:", authError);
+      // User data is already deleted from DB — log but don't fail the response
+    }
+
+    res.json({ success: true, message: "Account deleted successfully" });
+  } catch (error) {
+    console.error("Delete account error:", error);
+    res.status(500).json({ error: "Failed to delete account" });
   }
 });
 
