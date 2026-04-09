@@ -9,6 +9,7 @@ import notificationsRouter from "./routes/notifications";
 import invitesRouter from "./routes/invites";
 import searchRouter from "./routes/search";
 import builderRouter from "./routes/builder";
+import pushTokensRouter from "./routes/pushTokens";
 
 if (!process.env.OPENAI_API_KEY) {
   throw new Error('Missing OPENAI_API_KEY environment variable');
@@ -33,6 +34,7 @@ app.use("/nutrition", nutritionRouter);
 app.use("/invites", invitesRouter);
 app.use("/search", searchRouter);
 app.use("/builder", builderRouter);
+app.use("/push-tokens", pushTokensRouter);
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`API running on http://localhost:${port}`));

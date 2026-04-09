@@ -39,6 +39,9 @@ model User {
   sentInvites     DishListInvite[] @relation("InviteSender")
   receivedInvites DishListInvite[] @relation("InviteReceiver")
 
+  // Push tokens
+  pushTokens PushToken[]
+
   @@map("User")
 }
 
@@ -220,6 +223,18 @@ model Notification {
   receiver   User   @relation("NotificationReceiver", fields: [receiverId], references: [uid], onDelete: Cascade)
 
   @@map("Notification")
+}
+
+model PushToken {
+  id        String   @id @default(cuid())
+  token     String   // Expo push token (ExponentPushToken[...])
+  createdAt DateTime @default(now())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [uid], onDelete: Cascade)
+
+  @@unique([userId, token])
+  @@map("PushToken")
 }
 
 // Enums
