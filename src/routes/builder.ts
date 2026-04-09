@@ -11,7 +11,6 @@ interface ChatMessage {
 
 interface GeneratedRecipe {
   title: string;
-  description: string;
   prepTime: number | null;
   cookTime: number | null;
   servings: number | null;
@@ -22,7 +21,6 @@ interface GeneratedRecipe {
 
 interface GenerateResponse {
   recipes: GeneratedRecipe[];
-  message: string; // AI's conversational response
 }
 
 // ─── System Prompt ──────────────────────────────────────────────────
@@ -38,11 +36,9 @@ IMPORTANT RULES:
 
 RESPONSE FORMAT - respond with ONLY valid JSON, no markdown:
 {
-  "message": "A brief, friendly 1-2 sentence response acknowledging the user's request",
   "recipes": [
     {
       "title": "Recipe Name",
-      "description": "Brief 1-2 sentence description",
       "prepTime": 15,
       "cookTime": 30,
       "servings": 4,
@@ -139,7 +135,6 @@ router.post("/generate", authToken, async (req: AuthRequest, res) => {
     // Normalize recipes
     const recipes: GeneratedRecipe[] = parsed.recipes.slice(0, 4).map((r) => ({
       title: r.title || "Untitled Recipe",
-      description: r.description || "",
       prepTime: typeof r.prepTime === "number" ? r.prepTime : null,
       cookTime: typeof r.cookTime === "number" ? r.cookTime : null,
       servings: typeof r.servings === "number" ? r.servings : null,
@@ -159,7 +154,6 @@ router.post("/generate", authToken, async (req: AuthRequest, res) => {
     }));
 
     res.json({
-      message: parsed.message || "Here are some recipes for you!",
       recipes,
       // Return the assistant's raw content for conversation history
       assistantContent: content,
