@@ -24,6 +24,7 @@ interface ScoredRecipe {
   title: string;
   description: string | null;
   imageUrl: string | null;
+  imageUrls: string[];
   prepTime: number | null;
   cookTime: number | null;
   servings: number | null;
@@ -304,6 +305,11 @@ function scoreRecipe(
     title: recipe.title,
     description: recipe.description,
     imageUrl: recipe.imageUrl,
+    imageUrls: (recipe as any).imageUrls?.length
+      ? (recipe as any).imageUrls
+      : recipe.imageUrl
+        ? [recipe.imageUrl]
+        : [],
     prepTime: recipe.prepTime,
     cookTime: recipe.cookTime,
     servings: recipe.servings,

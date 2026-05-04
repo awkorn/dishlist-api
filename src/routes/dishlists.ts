@@ -300,6 +300,11 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
         cookTime: dr.recipe.cookTime,
         servings: dr.recipe.servings,
         imageUrl: dr.recipe.imageUrl,
+        imageUrls: (dr.recipe as any).imageUrls?.length
+          ? (dr.recipe as any).imageUrls
+          : dr.recipe.imageUrl
+            ? [dr.recipe.imageUrl]
+            : [],
         creatorId: dr.recipe.creatorId,
         creator: dr.recipe.creator,
         createdAt: dr.recipe.createdAt,

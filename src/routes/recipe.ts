@@ -9,6 +9,59 @@ import {
 } from "../types/recipe";
 
 const router = Router();
+const MAX_RECIPE_IMAGES = 4;
+
+function normalizeRecipeImages(
+  imageUrls: unknown,
+  imageUrl: unknown
+): { urls?: string[]; error?: string } {
+  const rawUrls =
+    imageUrls !== undefined
+      ? imageUrls
+      : typeof imageUrl === "string" && imageUrl.trim()
+        ? [imageUrl]
+        : [];
+
+  if (!Array.isArray(rawUrls)) {
+    return { error: "imageUrls must be an array" };
+  }
+
+  if (rawUrls.length > MAX_RECIPE_IMAGES) {
+    return { error: `Maximum ${MAX_RECIPE_IMAGES} images allowed` };
+  }
+
+  const urls: string[] = [];
+  for (const rawUrl of rawUrls) {
+    if (typeof rawUrl !== "string") {
+      return { error: "Each image URL must be a string" };
+    }
+
+    const trimmedUrl = rawUrl.trim();
+    if (trimmedUrl) {
+      urls.push(trimmedUrl);
+    }
+  }
+
+  return { urls };
+}
+
+function recipeWithImageUrls<T extends { imageUrl?: string | null }>(
+  recipe: T
+): T & { imageUrls: string[] } {
+  const imageUrls = Array.isArray((recipe as any).imageUrls)
+    ? (recipe as any).imageUrls
+    : [];
+
+  return {
+    ...recipe,
+    imageUrls:
+      imageUrls.length > 0
+        ? imageUrls
+        : recipe.imageUrl
+          ? [recipe.imageUrl]
+          : [],
+  };
+}
 
 // Create recipe and add to dishlist
 router.post("/", authToken, async (req: AuthRequest, res) => {
@@ -22,6 +75,7 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
       cookTime,
       servings,
       imageUrl,
+      imageUrls,
       nutrition,
       dishListId,
       tags,
@@ -67,9 +121,15 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
       return res.status(400).json({ error: tagsError });
     }
 
+    const normalizedImages = normalizeRecipeImages(imageUrls, imageUrl);
+    if (normalizedImages.error) {
+      return res.status(400).json({ error: normalizedImages.error });
+    }
+
     // Clean items before saving
     const cleanedIngredients = cleanRecipeItems(ingredients as RecipeItem[]);
     const cleanedInstructions = cleanRecipeItems(instructions as RecipeItem[]);
+    const recipeImageUrls = normalizedImages.urls || [];
 
     // Create recipe
     const recipe = await prisma.recipe.create({
@@ -81,11 +141,12 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
         prepTime: prepTime || null,
         cookTime: cookTime || null,
         servings: servings || null,
-        imageUrl: imageUrl || null,
+        imageUrl: recipeImageUrls[0] || null,
+        imageUrls: recipeImageUrls,
         nutrition: nutrition || null,
         tags: tags ? normalizeTags(tags) : [],
         creatorId: userId,
-      },
+      } as any,
       include: {
         creator: {
           select: {
@@ -109,7 +170,7 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
       });
     }
 
-    res.status(201).json({ recipe });
+    res.status(201).json({ recipe: recipeWithImageUrls(recipe) });
   } catch (error) {
     console.error("Create recipe error:", error);
     res.status(500).json({ error: "Failed to create recipe" });
@@ -151,7 +212,7 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
 
     res.json({
       recipe: {
-        ...recipe,
+        ...recipeWithImageUrls(recipe),
         isShareable,
       },
     });
@@ -274,6 +335,7 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
       cookTime,
       servings,
       imageUrl,
+      imageUrls,
       nutrition,
       tags,
     } = req.body;
@@ -316,9 +378,15 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
       return res.status(400).json({ error: tagsError });
     }
 
+    const normalizedImages = normalizeRecipeImages(imageUrls, imageUrl);
+    if (normalizedImages.error) {
+      return res.status(400).json({ error: normalizedImages.error });
+    }
+
     // Clean items before saving
     const cleanedIngredients = cleanRecipeItems(ingredients as RecipeItem[]);
     const cleanedInstructions = cleanRecipeItems(instructions as RecipeItem[]);
+    const recipeImageUrls = normalizedImages.urls || [];
 
     // Check if ingredients changed - if so, clear nutrition
     const ingredientsChanged =
@@ -339,10 +407,11 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
         prepTime: prepTime || null,
         cookTime: cookTime || null,
         servings: servings || null,
-        imageUrl: imageUrl || null,
+        imageUrl: recipeImageUrls[0] || null,
+        imageUrls: recipeImageUrls,
         nutrition: nutritionData,
         tags: tags ? normalizeTags(tags) : [],
-      },
+      } as any,
       include: {
         creator: {
           select: {
@@ -355,7 +424,7 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
       },
     });
 
-    res.json({ recipe: updatedRecipe });
+    res.json({ recipe: recipeWithImageUrls(updatedRecipe) });
   } catch (error) {
     console.error("Update recipe error:", error);
     res.status(500).json({ error: "Failed to update recipe" });

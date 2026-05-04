@@ -78,6 +78,7 @@ model Recipe {
   cookTime         Int?     // minutes
   servings         Int?
   imageUrl         String?
+  imageUrls        String[] @default([])
   nutrition        Json?
   tags             String[] @default([])
   originalRecipeId String?  // For tracking copied recipes
