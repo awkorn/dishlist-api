@@ -80,6 +80,7 @@ model Recipe {
   imageUrl         String?
   imageUrls        String[] @default([])
   nutrition        Json?
+  notes            String[] @default([])
   tags             String[] @default([])
   originalRecipeId String?  // For tracking copied recipes
   createdAt        DateTime @default(now())

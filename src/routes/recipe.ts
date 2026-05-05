@@ -63,6 +63,32 @@ function recipeWithImageUrls<T extends { imageUrl?: string | null }>(
   };
 }
 
+function normalizeRecipeNotes(
+  notes: unknown
+): { notes?: string[]; error?: string } {
+  if (notes === undefined || notes === null) {
+    return { notes: [] };
+  }
+
+  if (!Array.isArray(notes)) {
+    return { error: "notes must be an array" };
+  }
+
+  const normalizedNotes: string[] = [];
+  for (const note of notes) {
+    if (typeof note !== "string") {
+      return { error: "Each note must be a string" };
+    }
+
+    const trimmedNote = note.trim();
+    if (trimmedNote) {
+      normalizedNotes.push(trimmedNote);
+    }
+  }
+
+  return { notes: normalizedNotes };
+}
+
 // Create recipe and add to dishlist
 router.post("/", authToken, async (req: AuthRequest, res) => {
   try {
@@ -77,6 +103,7 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
       imageUrl,
       imageUrls,
       nutrition,
+      notes,
       dishListId,
       tags,
     } = req.body;
@@ -126,6 +153,11 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
       return res.status(400).json({ error: normalizedImages.error });
     }
 
+    const normalizedNotes = normalizeRecipeNotes(notes);
+    if (normalizedNotes.error) {
+      return res.status(400).json({ error: normalizedNotes.error });
+    }
+
     // Clean items before saving
     const cleanedIngredients = cleanRecipeItems(ingredients as RecipeItem[]);
     const cleanedInstructions = cleanRecipeItems(instructions as RecipeItem[]);
@@ -144,6 +176,7 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
         imageUrl: recipeImageUrls[0] || null,
         imageUrls: recipeImageUrls,
         nutrition: nutrition || null,
+        notes: normalizedNotes.notes || [],
         tags: tags ? normalizeTags(tags) : [],
         creatorId: userId,
       } as any,
@@ -337,6 +370,7 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
       imageUrl,
       imageUrls,
       nutrition,
+      notes,
       tags,
     } = req.body;
 
@@ -383,6 +417,17 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
       return res.status(400).json({ error: normalizedImages.error });
     }
 
+    const normalizedNotes =
+      notes === undefined
+        ? {
+            notes:
+              ((existingRecipe as any).notes as string[] | undefined) || [],
+          }
+        : normalizeRecipeNotes(notes);
+    if (normalizedNotes.error) {
+      return res.status(400).json({ error: normalizedNotes.error });
+    }
+
     // Clean items before saving
     const cleanedIngredients = cleanRecipeItems(ingredients as RecipeItem[]);
     const cleanedInstructions = cleanRecipeItems(instructions as RecipeItem[]);
@@ -410,6 +455,7 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
         imageUrl: recipeImageUrls[0] || null,
         imageUrls: recipeImageUrls,
         nutrition: nutritionData,
+        notes: normalizedNotes.notes || [],
         tags: tags ? normalizeTags(tags) : [],
       } as any,
       include: {
