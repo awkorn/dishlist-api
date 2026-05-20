@@ -1,7 +1,11 @@
 import { Router } from "express";
 import prisma from "../lib/prisma";
 import { authToken, optionalAuthToken, AuthRequest } from "../middleware/auth";
-import { areUsersBlocked, filterBlockedRecipientIds } from "../lib/blocks";
+import {
+  areUsersBlocked,
+  filterBlockedRecipientIds,
+  getBlockContext,
+} from "../lib/blocks";
 
 const router = Router();
 
@@ -300,9 +304,11 @@ router.post("/:token/validate", optionalAuthToken, async (req: AuthRequest, res)
     if (userId) {
       isOwner = invite.dishList.ownerId === userId;
 
+      const blockContext = await getBlockContext(userId);
+
       if (
-        (await areUsersBlocked(userId, invite.inviterId)) ||
-        (await areUsersBlocked(userId, invite.dishList.ownerId))
+        blockContext.isBlocked(invite.inviterId) ||
+        blockContext.isBlocked(invite.dishList.ownerId)
       ) {
         return res.status(403).json({
           error: "This invite is no longer available",
@@ -382,9 +388,11 @@ router.post("/:token/accept", authToken, async (req: AuthRequest, res) => {
       return res.status(400).json({ error: "You cannot collaborate on your own DishList", code: "IS_OWNER" });
     }
 
+    const blockContext = await getBlockContext(userId);
+
     if (
-      (await areUsersBlocked(userId, invite.inviterId)) ||
-      (await areUsersBlocked(userId, invite.dishList.ownerId))
+      blockContext.isBlocked(invite.inviterId) ||
+      blockContext.isBlocked(invite.dishList.ownerId)
     ) {
       return res.status(403).json({
         error: "This invite is no longer available",

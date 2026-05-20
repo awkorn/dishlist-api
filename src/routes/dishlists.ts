@@ -2,8 +2,7 @@ import { Router } from "express";
 import prisma from "../lib/prisma";
 import { authToken, AuthRequest } from "../middleware/auth";
 import {
-  areUsersBlocked,
-  filterBlockedRecipientIds,
+  getBlockContext,
   getBlockedPeerIds,
 } from "../lib/blocks";
 
@@ -226,69 +225,70 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
       ],
     };
 
-    const dishList = await prisma.dishList.findFirst({
-      where: {
-        id: dishListId,
-        ...visibilityCondition,
-      },
-      include: {
-        _count: {
-          select: {
-            recipes: true,
-            followers: true,
-            collaborators: true,
+    const [dishList, blockContext] = await Promise.all([
+      prisma.dishList.findFirst({
+        where: {
+          id: dishListId,
+          ...visibilityCondition,
+        },
+        include: {
+          _count: {
+            select: {
+              recipes: true,
+              followers: true,
+              collaborators: true,
+            },
           },
-        },
-        owner: {
-          select: {
-            uid: true,
-            username: true,
-            firstName: true,
-            lastName: true,
-            avatarUrl: true,
+          owner: {
+            select: {
+              uid: true,
+              username: true,
+              firstName: true,
+              lastName: true,
+              avatarUrl: true,
+            },
           },
-        },
-        collaborators: {
-          where: { userId },
-          select: { userId: true },
-        },
-        followers: {
-          where: { userId },
-          select: { userId: true },
-        },
-        recipes: {
-          include: {
-            recipe: {
-              include: {
-                creator: {
-                  select: {
-                    uid: true,
-                    username: true,
-                    firstName: true,
-                    lastName: true,
+          collaborators: {
+            where: { userId },
+            select: { userId: true },
+          },
+          followers: {
+            where: { userId },
+            select: { userId: true },
+          },
+          recipes: {
+            include: {
+              recipe: {
+                include: {
+                  creator: {
+                    select: {
+                      uid: true,
+                      username: true,
+                      firstName: true,
+                      lastName: true,
+                    },
                   },
                 },
               },
             },
+            orderBy: { addedAt: "desc" },
           },
-          orderBy: { addedAt: "desc" },
+          pins: {
+            where: { userId },
+            select: { userId: true },
+          },
         },
-        pins: {
-          where: { userId },
-          select: { userId: true },
-        },
-      },
-    });
+      }),
+      getBlockContext(userId),
+    ]);
 
     if (!dishList) {
       return res.status(404).json({ error: "DishList not found" });
     }
 
-    if (await areUsersBlocked(userId, dishList.ownerId)) {
+    if (blockContext.isBlocked(dishList.ownerId)) {
       return res.status(404).json({ error: "DishList not found" });
     }
-
-    const blockedPeerIds = await getBlockedPeerIds(userId);
 
     // Transform response
     const transformedDishList = {
@@ -306,7 +306,7 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
       isFollowing: dishList.followers.length > 0,
       owner: dishList.owner,
       recipes: dishList.recipes
-        .filter((dr) => !blockedPeerIds.includes(dr.recipe.creatorId))
+        .filter((dr) => !blockContext.isBlocked(dr.recipe.creatorId))
         .map((dr) => ({
         id: dr.recipe.id,
         title: dr.recipe.title,
@@ -345,21 +345,23 @@ router.post("/:id/follow", authToken, async (req: AuthRequest, res) => {
     const dishListId = req.params.id;
     const userId = req.user!.uid;
 
-    // Check if dishlist exists and is public or user has access
-    const dishList = await prisma.dishList.findUnique({
-      where: { id: dishListId },
-      include: {
-        collaborators: {
-          where: { userId },
+    const [dishList, blockContext] = await Promise.all([
+      prisma.dishList.findUnique({
+        where: { id: dishListId },
+        include: {
+          collaborators: {
+            where: { userId },
+          },
         },
-      },
-    });
+      }),
+      getBlockContext(userId),
+    ]);
 
     if (!dishList) {
       return res.status(404).json({ error: "DishList not found" });
     }
 
-    if (await areUsersBlocked(userId, dishList.ownerId)) {
+    if (blockContext.isBlocked(dishList.ownerId)) {
       return res.status(403).json({ error: "Cannot follow this DishList" });
     }
 
@@ -681,26 +683,37 @@ router.post("/:id/share", authToken, async (req: AuthRequest, res) => {
         .json({ error: "At least one recipient is required" });
     }
 
-    // Get the DishList to verify it exists and is public
-    const dishList = await prisma.dishList.findUnique({
-      where: { id: dishListId },
-      include: {
-        owner: {
-          select: {
-            uid: true,
-            username: true,
-            firstName: true,
-            lastName: true,
+    const [dishList, sender, blockContext] = await Promise.all([
+      prisma.dishList.findUnique({
+        where: { id: dishListId },
+        include: {
+          owner: {
+            select: {
+              uid: true,
+              username: true,
+              firstName: true,
+              lastName: true,
+            },
           },
         },
-      },
-    });
+      }),
+      prisma.user.findUnique({
+        where: { uid: userId },
+        select: {
+          uid: true,
+          username: true,
+          firstName: true,
+          lastName: true,
+        },
+      }),
+      getBlockContext(userId),
+    ]);
 
     if (!dishList) {
       return res.status(404).json({ error: "DishList not found" });
     }
 
-    if (await areUsersBlocked(userId, dishList.ownerId)) {
+    if (blockContext.isBlocked(dishList.ownerId)) {
       return res.status(404).json({ error: "DishList not found" });
     }
 
@@ -711,17 +724,6 @@ router.post("/:id/share", authToken, async (req: AuthRequest, res) => {
         .json({ error: "Only public DishLists can be shared" });
     }
 
-    // Get sender info
-    const sender = await prisma.user.findUnique({
-      where: { uid: userId },
-      select: {
-        uid: true,
-        username: true,
-        firstName: true,
-        lastName: true,
-      },
-    });
-
     if (!sender) {
       return res.status(404).json({ error: "Sender not found" });
     }
@@ -729,7 +731,14 @@ router.post("/:id/share", authToken, async (req: AuthRequest, res) => {
     // Build sender display name
     const senderName = sender.firstName || sender.username || "Someone";
 
-    const allowedRecipientIds = await filterBlockedRecipientIds(userId, recipientIds);
+    const allowedRecipientIds = Array.from(
+      new Set(
+        recipientIds.filter(
+          (recipientId: string) =>
+            recipientId !== userId && !blockContext.isBlocked(recipientId)
+        )
+      )
+    );
     if (allowedRecipientIds.length === 0) {
       return res.json({
         success: true,
@@ -777,71 +786,14 @@ router.get("/:id/collaborators", authToken, async (req: AuthRequest, res) => {
     const dishListId = req.params.id;
     const userId = req.user!.uid;
 
-    // Verify DishList exists and user has access
-    const dishList = await prisma.dishList.findFirst({
-      where: {
-        id: dishListId,
-        OR: [{ ownerId: userId }, { collaborators: { some: { userId } } }],
-      },
-      include: {
-        owner: {
-          select: {
-            uid: true,
-            username: true,
-            firstName: true,
-            lastName: true,
-            avatarUrl: true,
-          },
-        },
-      },
-    });
-
-    if (!dishList) {
-      return res
-        .status(404)
-        .json({ error: "DishList not found or access denied" });
-    }
-
-    const isOwner = dishList.ownerId === userId;
-    const blockedPeerIds = await getBlockedPeerIds(userId);
-
-    if (blockedPeerIds.includes(dishList.ownerId)) {
-      return res.status(404).json({ error: "DishList not found or access denied" });
-    }
-
-    // Get confirmed collaborators
-    const collaborators = await prisma.dishListCollaborator.findMany({
-      where: {
-        dishListId,
-        userId: { notIn: blockedPeerIds },
-      },
-      include: {
-        user: {
-          select: {
-            uid: true,
-            username: true,
-            firstName: true,
-            lastName: true,
-            avatarUrl: true,
-          },
-        },
-      },
-      orderBy: { invitedAt: "asc" },
-    });
-
-    // Only owner can see pending invites
-    let pendingInvites: any[] = [];
-    if (isOwner) {
-      pendingInvites = await prisma.dishListInvite.findMany({
+    const [dishList, blockContext] = await Promise.all([
+      prisma.dishList.findFirst({
         where: {
-          dishListId,
-          usedAt: null,
-          expiresAt: { gt: new Date() },
-          inviteeId: { not: null }, // Only show direct invites, not link invites
-          NOT: { inviteeId: { in: blockedPeerIds } },
+          id: dishListId,
+          OR: [{ ownerId: userId }, { collaborators: { some: { userId } } }],
         },
         include: {
-          invitee: {
+          owner: {
             select: {
               uid: true,
               username: true,
@@ -851,9 +803,65 @@ router.get("/:id/collaborators", authToken, async (req: AuthRequest, res) => {
             },
           },
         },
-        orderBy: { createdAt: "desc" },
-      });
+      }),
+      getBlockContext(userId),
+    ]);
+
+    if (!dishList) {
+      return res
+        .status(404)
+        .json({ error: "DishList not found or access denied" });
     }
+
+    const isOwner = dishList.ownerId === userId;
+
+    if (blockContext.isBlocked(dishList.ownerId)) {
+      return res.status(404).json({ error: "DishList not found or access denied" });
+    }
+
+    const [collaborators, pendingInvites] = await Promise.all([
+      prisma.dishListCollaborator.findMany({
+        where: {
+          dishListId,
+          userId: { notIn: blockContext.blockedPeerIds },
+        },
+        include: {
+          user: {
+            select: {
+              uid: true,
+              username: true,
+              firstName: true,
+              lastName: true,
+              avatarUrl: true,
+            },
+          },
+        },
+        orderBy: { invitedAt: "asc" },
+      }),
+      isOwner
+        ? prisma.dishListInvite.findMany({
+            where: {
+              dishListId,
+              usedAt: null,
+              expiresAt: { gt: new Date() },
+              inviteeId: { not: null }, // Only show direct invites, not link invites
+              NOT: { inviteeId: { in: blockContext.blockedPeerIds } },
+            },
+            include: {
+              invitee: {
+                select: {
+                  uid: true,
+                  username: true,
+                  firstName: true,
+                  lastName: true,
+                  avatarUrl: true,
+                },
+              },
+            },
+            orderBy: { createdAt: "desc" },
+          })
+        : Promise.resolve([]),
+    ]);
 
     res.json({
       owner: dishList.owner,
@@ -939,10 +947,17 @@ router.delete(
       const inviteId = req.params.inviteId;
       const userId = req.user!.uid;
 
-      // Verify ownership
-      const dishList = await prisma.dishList.findUnique({
-        where: { id: dishListId },
-      });
+      const [dishList, invite] = await Promise.all([
+        prisma.dishList.findUnique({
+          where: { id: dishListId },
+        }),
+        prisma.dishListInvite.findFirst({
+          where: {
+            id: inviteId,
+            dishListId,
+          },
+        }),
+      ]);
 
       if (!dishList) {
         return res.status(404).json({ error: "DishList not found" });
@@ -953,14 +968,6 @@ router.delete(
           .status(403)
           .json({ error: "Only the owner can revoke invites" });
       }
-
-      // Get invite to find the invitee for notification cleanup
-      const invite = await prisma.dishListInvite.findFirst({
-        where: {
-          id: inviteId,
-          dishListId,
-        },
-      });
 
       if (!invite) {
         return res.status(404).json({ error: "Invite not found" });
@@ -1005,10 +1012,24 @@ router.post(
       const inviteId = req.params.inviteId;
       const userId = req.user!.uid;
 
-      // Verify ownership
-      const dishList = await prisma.dishList.findUnique({
-        where: { id: dishListId },
-      });
+      const [dishList, invite, sender, blockContext] = await Promise.all([
+        prisma.dishList.findUnique({
+          where: { id: dishListId },
+        }),
+        prisma.dishListInvite.findFirst({
+          where: {
+            id: inviteId,
+            dishListId,
+            usedAt: null,
+            inviteeId: { not: null },
+          },
+        }),
+        prisma.user.findUnique({
+          where: { uid: userId },
+          select: { firstName: true, username: true },
+        }),
+        getBlockContext(userId),
+      ]);
 
       if (!dishList) {
         return res.status(404).json({ error: "DishList not found" });
@@ -1020,16 +1041,6 @@ router.post(
           .json({ error: "Only the owner can resend invites" });
       }
 
-      // Get invite
-      const invite = await prisma.dishListInvite.findFirst({
-        where: {
-          id: inviteId,
-          dishListId,
-          usedAt: null,
-          inviteeId: { not: null },
-        },
-      });
-
       if (!invite) {
         return res.status(404).json({ error: "Pending invite not found" });
       }
@@ -1038,16 +1049,10 @@ router.post(
         return res.status(400).json({ error: "Cannot resend link invites" });
       }
 
-      if (await areUsersBlocked(userId, invite.inviteeId)) {
+      if (blockContext.isBlocked(invite.inviteeId)) {
         await prisma.dishListInvite.delete({ where: { id: invite.id } });
         return res.status(403).json({ error: "Cannot resend invite to this user" });
       }
-
-      // Get sender info
-      const sender = await prisma.user.findUnique({
-        where: { uid: userId },
-        select: { firstName: true, username: true },
-      });
 
       const senderName = sender?.firstName || sender?.username || "Someone";
 

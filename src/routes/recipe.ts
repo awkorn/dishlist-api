@@ -2,7 +2,10 @@ import { Router } from "express";
 import prisma from "../lib/prisma";
 import { authToken, AuthRequest } from "../middleware/auth";
 import { normalizeTags, validateTags } from "../utils/tags";
-import { areUsersBlocked, filterBlockedRecipientIds } from "../lib/blocks";
+import {
+  areUsersBlocked,
+  getBlockContext,
+} from "../lib/blocks";
 import {
   validateRecipeItems,
   cleanRecipeItems,
@@ -279,26 +282,28 @@ router.post("/:id/share", authToken, async (req: AuthRequest, res) => {
         .json({ error: "At least one recipient is required" });
     }
 
-    // Get the Recipe to verify it exists
-    const recipe = await prisma.recipe.findUnique({
-      where: { id: recipeId },
-      include: {
-        creator: {
-          select: {
-            uid: true,
-            username: true,
-            firstName: true,
-            lastName: true,
+    const [recipe, blockContext] = await Promise.all([
+      prisma.recipe.findUnique({
+        where: { id: recipeId },
+        include: {
+          creator: {
+            select: {
+              uid: true,
+              username: true,
+              firstName: true,
+              lastName: true,
+            },
           },
         },
-      },
-    });
+      }),
+      getBlockContext(userId),
+    ]);
 
     if (!recipe) {
       return res.status(404).json({ error: "Recipe not found" });
     }
 
-    if (await areUsersBlocked(userId, recipe.creatorId)) {
+    if (blockContext.isBlocked(recipe.creatorId)) {
       return res.status(404).json({ error: "Recipe not found" });
     }
 
@@ -336,7 +341,14 @@ router.post("/:id/share", authToken, async (req: AuthRequest, res) => {
     // Build sender display name
     const senderName = sender.firstName || sender.username || "Someone";
 
-    const allowedRecipientIds = await filterBlockedRecipientIds(userId, recipientIds);
+    const allowedRecipientIds = Array.from(
+      new Set(
+        recipientIds.filter(
+          (recipientId: string) =>
+            recipientId !== userId && !blockContext.isBlocked(recipientId)
+        )
+      )
+    );
     if (allowedRecipientIds.length === 0) {
       return res.json({
         success: true,

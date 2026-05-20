@@ -8,10 +8,18 @@ export type BlockStatus =
 
 type PrismaLike = typeof prisma;
 
+type BlockRow = { blockerId: string; blockedId: string };
+
+export type BlockContext = {
+  blockedPeerIds: string[];
+  isBlocked: (peerId: string | null | undefined) => boolean;
+  getStatus: (peerId: string | null | undefined) => BlockStatus;
+};
+
 export function getBlockStatusFromRows(
   viewerId: string,
   targetId: string,
-  blocks: Array<{ blockerId: string; blockedId: string }>
+  blocks: BlockRow[]
 ): BlockStatus {
   const blockedByMe = blocks.some(
     (block) => block.blockerId === viewerId && block.blockedId === targetId
@@ -53,29 +61,41 @@ export async function areUsersBlocked(
 ): Promise<boolean> {
   if (firstUserId === secondUserId) return false;
 
-  const count = await client.userBlock.count({
+  const block = await client.userBlock.findFirst({
     where: {
       OR: [
         { blockerId: firstUserId, blockedId: secondUserId },
         { blockerId: secondUserId, blockedId: firstUserId },
       ],
     },
+    select: { id: true },
   });
 
-  return count > 0;
+  return !!block;
+}
+
+async function getBlockRows(
+  userId: string,
+  client: PrismaLike = prisma
+): Promise<BlockRow[]> {
+  return client.userBlock.findMany({
+    where: {
+      OR: [{ blockerId: userId }, { blockedId: userId }],
+    },
+    select: { blockerId: true, blockedId: true },
+  });
 }
 
 export async function getBlockedPeerIds(
   userId: string,
   client: PrismaLike = prisma
 ): Promise<string[]> {
-  const blocks = await client.userBlock.findMany({
-    where: {
-      OR: [{ blockerId: userId }, { blockedId: userId }],
-    },
-    select: { blockerId: true, blockedId: true },
-  });
+  const blocks = await getBlockRows(userId, client);
 
+  return getBlockedPeerIdsFromRows(userId, blocks);
+}
+
+function getBlockedPeerIdsFromRows(userId: string, blocks: BlockRow[]): string[] {
   return Array.from(
     new Set(
       blocks.map((block) =>
@@ -83,6 +103,25 @@ export async function getBlockedPeerIds(
       )
     )
   );
+}
+
+export async function getBlockContext(
+  userId: string,
+  client: PrismaLike = prisma
+): Promise<BlockContext> {
+  const blocks = await getBlockRows(userId, client);
+  const blockedPeerIds = getBlockedPeerIdsFromRows(userId, blocks);
+  const blockedPeerIdSet = new Set(blockedPeerIds);
+
+  return {
+    blockedPeerIds,
+    isBlocked: (peerId) =>
+      !!peerId && peerId !== userId && blockedPeerIdSet.has(peerId),
+    getStatus: (peerId) =>
+      peerId && peerId !== userId
+        ? getBlockStatusFromRows(userId, peerId, blocks)
+        : "NONE",
+  };
 }
 
 export async function filterBlockedRecipientIds(

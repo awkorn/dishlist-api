@@ -1,7 +1,10 @@
 import express from "express";
 import { authToken, AuthRequest } from "../middleware/auth";
 import prisma from "../lib/prisma";
-import { areUsersBlocked, getBlockedPeerIds } from "../lib/blocks";
+import {
+  getBlockContext,
+  getBlockedPeerIds,
+} from "../lib/blocks";
 
 const router = express.Router();
 
@@ -172,7 +175,9 @@ router.post("/:id/accept-invitation", authToken, async (req: AuthRequest, res) =
       return res.status(404).json({ error: "Invitation not found" });
     }
 
-    if (notification.senderId && (await areUsersBlocked(userId, notification.senderId))) {
+    const blockContext = await getBlockContext(userId);
+
+    if (notification.senderId && blockContext.isBlocked(notification.senderId)) {
       await prisma.notification.delete({ where: { id: notificationId } });
       return res.status(403).json({ error: "Invitation is no longer available" });
     }
@@ -236,7 +241,7 @@ router.post("/:id/accept-invitation", authToken, async (req: AuthRequest, res) =
 
         const accepterName = acceptingUser?.firstName || acceptingUser?.username || "Someone";
 
-        if (!(await areUsersBlocked(userId, notification.senderId, tx as any))) {
+        if (!blockContext.isBlocked(notification.senderId)) {
           await tx.notification.create({
             data: {
               type: "COLLABORATION_ACCEPTED",
@@ -318,7 +323,9 @@ router.post("/:id/accept-follow", authToken, async (req: AuthRequest, res) => {
       return res.status(400).json({ error: "Invalid follow request" });
     }
 
-    if (await areUsersBlocked(userId, requesterId)) {
+    const blockContext = await getBlockContext(userId);
+
+    if (blockContext.isBlocked(requesterId)) {
       await prisma.$transaction(async (tx) => {
         await tx.userFollow.deleteMany({
           where: {
@@ -376,7 +383,7 @@ router.post("/:id/accept-follow", authToken, async (req: AuthRequest, res) => {
         where: { id: notificationId },
       });
 
-      if (!(await areUsersBlocked(userId, requesterId, tx as any))) {
+      if (!blockContext.isBlocked(requesterId)) {
         // Send acceptance notification to requester
         await tx.notification.create({
           data: {

@@ -4,7 +4,7 @@ import { supabaseAdmin } from "../lib/supabase";
 import { authToken, AuthRequest } from "../middleware/auth";
 import {
   areUsersBlocked,
-  getBlockedPeerIds,
+  getBlockContext,
   getBlockStatus,
 } from "../lib/blocks";
 
@@ -206,7 +206,7 @@ router.get("/mutuals", authToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.uid;
     const { search } = req.query;
-    const blockedPeerIds = await getBlockedPeerIds(userId);
+    const { blockedPeerIds } = await getBlockContext(userId);
 
     // Find users where:
     // 1. Current user follows them (they are in user's "following" list)
@@ -390,23 +390,24 @@ router.get("/:userId", authToken, async (req: AuthRequest, res) => {
       ? Math.max(recipesOffsetRaw, 0)
       : 0;
 
-    const user = await prisma.user.findUnique({
-      where: { uid: userId },
-      include: {
-        _count: {
-          select: {
-            followers: { where: { status: "ACCEPTED" } },
-            following: { where: { status: "ACCEPTED" } },
+    const [user, blockStatus] = await Promise.all([
+      prisma.user.findUnique({
+        where: { uid: userId },
+        include: {
+          _count: {
+            select: {
+              followers: { where: { status: "ACCEPTED" } },
+              following: { where: { status: "ACCEPTED" } },
+            },
           },
         },
-      },
-    });
+      }),
+      getBlockStatus(currentUserId, userId),
+    ]);
 
     if (!user) {
       return res.status(404).json({ error: "User not found" });
     }
-
-    const blockStatus = await getBlockStatus(currentUserId, userId);
 
     if (blockStatus !== "NONE") {
       return res.json({
@@ -600,28 +601,28 @@ router.post("/:id/follow", authToken, async (req: AuthRequest, res) => {
       return res.status(400).json({ error: "Cannot follow yourself" });
     }
 
-    // Check target user exists
-    const targetUser = await prisma.user.findUnique({
-      where: { uid: targetUserId },
-    });
+    const [targetUser, isBlocked, existingFollow] = await Promise.all([
+      prisma.user.findUnique({
+        where: { uid: targetUserId },
+      }),
+      areUsersBlocked(currentUserId, targetUserId),
+      prisma.userFollow.findUnique({
+        where: {
+          followerId_followingId: {
+            followerId: currentUserId,
+            followingId: targetUserId,
+          },
+        },
+      }),
+    ]);
 
     if (!targetUser) {
       return res.status(404).json({ error: "User not found" });
     }
 
-    if (await areUsersBlocked(currentUserId, targetUserId)) {
+    if (isBlocked) {
       return res.status(403).json({ error: "Cannot follow this user" });
     }
-
-    // Check for existing follow/request
-    const existingFollow = await prisma.userFollow.findUnique({
-      where: {
-        followerId_followingId: {
-          followerId: currentUserId,
-          followingId: targetUserId,
-        },
-      },
-    });
 
     if (existingFollow) {
       if (existingFollow.status === "ACCEPTED") {
@@ -750,31 +751,33 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
     const currentUserId = req.user!.uid;
     const isOwnProfile = userId === currentUserId;
 
-    const user = await prisma.user.findUnique({
-      where: { uid: userId },
-      include: {
-        ownedDishLists: {
-          where: { isDefault: false },
-          orderBy: { createdAt: "desc" },
-        },
-        _count: {
-          select: {
-            followers: {
-              where: { status: "ACCEPTED" }, // Only count accepted followers
-            },
-            following: {
-              where: { status: "ACCEPTED" }, // Only count accepted following
+    const [user, blockStatus] = await Promise.all([
+      prisma.user.findUnique({
+        where: { uid: userId },
+        include: {
+          ownedDishLists: {
+            where: { isDefault: false },
+            orderBy: { createdAt: "desc" },
+          },
+          _count: {
+            select: {
+              followers: {
+                where: { status: "ACCEPTED" }, // Only count accepted followers
+              },
+              following: {
+                where: { status: "ACCEPTED" }, // Only count accepted following
+              },
             },
           },
         },
-      },
-    });
+      }),
+      getBlockStatus(currentUserId, userId),
+    ]);
 
     if (!user) {
       return res.status(404).json({ error: "User not found" });
     }
 
-    const blockStatus = await getBlockStatus(currentUserId, userId);
     if (blockStatus !== "NONE") {
       return res.json({
         uid: user.uid,
@@ -835,18 +838,19 @@ router.get("/:userId/followers", authToken, async (req: AuthRequest, res) => {
   try {
     const { userId } = req.params;
     const currentUserId = req.user!.uid;
-    const blockedPeerIds = await getBlockedPeerIds(currentUserId);
 
-    // Check user exists
-    const targetUser = await prisma.user.findUnique({
-      where: { uid: userId },
-    });
+    const [targetUser, blockContext] = await Promise.all([
+      prisma.user.findUnique({
+        where: { uid: userId },
+      }),
+      getBlockContext(currentUserId),
+    ]);
 
     if (!targetUser) {
       return res.status(404).json({ error: "User not found" });
     }
 
-    if (await areUsersBlocked(currentUserId, userId)) {
+    if (blockContext.isBlocked(userId)) {
       return res.json({ users: [] });
     }
 
@@ -855,7 +859,7 @@ router.get("/:userId/followers", authToken, async (req: AuthRequest, res) => {
       where: {
         followingId: userId,
         status: "ACCEPTED",
-        followerId: { notIn: blockedPeerIds },
+        followerId: { notIn: blockContext.blockedPeerIds },
       },
       include: {
         follower: {
@@ -914,18 +918,19 @@ router.get("/:userId/following", authToken, async (req: AuthRequest, res) => {
   try {
     const { userId } = req.params;
     const currentUserId = req.user!.uid;
-    const blockedPeerIds = await getBlockedPeerIds(currentUserId);
 
-    // Check user exists
-    const targetUser = await prisma.user.findUnique({
-      where: { uid: userId },
-    });
+    const [targetUser, blockContext] = await Promise.all([
+      prisma.user.findUnique({
+        where: { uid: userId },
+      }),
+      getBlockContext(currentUserId),
+    ]);
 
     if (!targetUser) {
       return res.status(404).json({ error: "User not found" });
     }
 
-    if (await areUsersBlocked(currentUserId, userId)) {
+    if (blockContext.isBlocked(userId)) {
       return res.json({ users: [] });
     }
 
@@ -934,7 +939,7 @@ router.get("/:userId/following", authToken, async (req: AuthRequest, res) => {
       where: {
         followerId: userId,
         status: "ACCEPTED",
-        followingId: { notIn: blockedPeerIds },
+        followingId: { notIn: blockContext.blockedPeerIds },
       },
       include: {
         following: {
