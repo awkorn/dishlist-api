@@ -11,9 +11,37 @@ import {
   cleanRecipeItems,
   RecipeItem,
 } from "../types/recipe";
+import {
+  handleModerationError,
+  moderateTextFields,
+} from "../lib/moderation";
 
 const router = Router();
 const MAX_RECIPE_IMAGES = 4;
+
+function isAllowedRecipeImageUrl(url: string) {
+  return url.startsWith(
+    `${process.env.SUPABASE_URL}/storage/v1/object/public/recipes/`
+  );
+}
+
+function recipeModerationFields(input: {
+  title?: unknown;
+  description?: unknown;
+  ingredients?: unknown;
+  instructions?: unknown;
+  notes?: unknown;
+  tags?: unknown;
+}) {
+  return [
+    { label: "Recipe title", value: input.title },
+    { label: "Recipe description", value: input.description },
+    { label: "Recipe ingredients", value: input.ingredients },
+    { label: "Recipe instructions", value: input.instructions },
+    { label: "Recipe notes", value: input.notes },
+    { label: "Recipe tags", value: input.tags },
+  ];
+}
 
 function normalizeRecipeImages(
   imageUrls: unknown,
@@ -157,6 +185,16 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
       return res.status(400).json({ error: normalizedImages.error });
     }
 
+    if (
+      (normalizedImages.urls || []).some(
+        (url) => !isAllowedRecipeImageUrl(url)
+      )
+    ) {
+      return res.status(400).json({
+        error: "Recipe images must be uploaded through DishList.",
+      });
+    }
+
     const normalizedNotes = normalizeRecipeNotes(notes);
     if (normalizedNotes.error) {
       return res.status(400).json({ error: normalizedNotes.error });
@@ -166,6 +204,18 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
     const cleanedIngredients = cleanRecipeItems(ingredients as RecipeItem[]);
     const cleanedInstructions = cleanRecipeItems(instructions as RecipeItem[]);
     const recipeImageUrls = normalizedImages.urls || [];
+
+    await moderateTextFields(
+      recipeModerationFields({
+        title,
+        description,
+        ingredients: cleanedIngredients,
+        instructions: cleanedInstructions,
+        notes: normalizedNotes.notes,
+        tags,
+      }),
+      { targetType: "RECIPE", userId }
+    );
 
     // Create recipe
     const recipe = await prisma.recipe.create({
@@ -209,6 +259,8 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
 
     res.status(201).json({ recipe: recipeWithImageUrls(recipe) });
   } catch (error) {
+    if (handleModerationError(error, res)) return;
+
     console.error("Create recipe error:", error);
     res.status(500).json({ error: "Failed to create recipe" });
   }
@@ -449,6 +501,16 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
       return res.status(400).json({ error: normalizedImages.error });
     }
 
+    if (
+      (normalizedImages.urls || []).some(
+        (url) => !isAllowedRecipeImageUrl(url)
+      )
+    ) {
+      return res.status(400).json({
+        error: "Recipe images must be uploaded through DishList.",
+      });
+    }
+
     const normalizedNotes =
       notes === undefined
         ? {
@@ -464,6 +526,18 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
     const cleanedIngredients = cleanRecipeItems(ingredients as RecipeItem[]);
     const cleanedInstructions = cleanRecipeItems(instructions as RecipeItem[]);
     const recipeImageUrls = normalizedImages.urls || [];
+
+    await moderateTextFields(
+      recipeModerationFields({
+        title,
+        description,
+        ingredients: cleanedIngredients,
+        instructions: cleanedInstructions,
+        notes: normalizedNotes.notes,
+        tags,
+      }),
+      { targetType: "RECIPE", targetId: recipeId, userId }
+    );
 
     // Check if ingredients changed - if so, clear nutrition
     const ingredientsChanged =
@@ -504,6 +578,8 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
 
     res.json({ recipe: recipeWithImageUrls(updatedRecipe) });
   } catch (error) {
+    if (handleModerationError(error, res)) return;
+
     console.error("Update recipe error:", error);
     res.status(500).json({ error: "Failed to update recipe" });
   }

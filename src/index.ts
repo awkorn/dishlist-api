@@ -10,6 +10,8 @@ import invitesRouter from "./routes/invites";
 import searchRouter from "./routes/search";
 import builderRouter from "./routes/builder";
 import pushTokensRouter from "./routes/pushTokens";
+import uploadsRouter from "./routes/uploads";
+import reportsRouter from "./routes/reports";
 
 if (!process.env.OPENAI_API_KEY) {
   throw new Error('Missing OPENAI_API_KEY environment variable');
@@ -35,6 +37,8 @@ app.use("/invites", invitesRouter);
 app.use("/search", searchRouter);
 app.use("/builder", builderRouter);
 app.use("/push-tokens", pushTokensRouter);
+app.use("/uploads", uploadsRouter);
+app.use("/reports", reportsRouter);
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`API running on http://localhost:${port}`));

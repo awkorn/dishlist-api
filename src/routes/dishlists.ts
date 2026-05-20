@@ -5,6 +5,10 @@ import {
   getBlockContext,
   getBlockedPeerIds,
 } from "../lib/blocks";
+import {
+  handleModerationError,
+  moderateTextFields,
+} from "../lib/moderation";
 
 const router = Router();
 
@@ -120,6 +124,14 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
       return res.status(400).json({ error: "Title is required" });
     }
 
+    await moderateTextFields(
+      [
+        { label: "DishList title", value: title },
+        { label: "DishList description", value: description },
+      ],
+      { targetType: "DISHLIST", userId }
+    );
+
     const dishList = await prisma.dishList.create({
       data: {
         title: title.trim(),
@@ -143,6 +155,8 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
 
     res.status(201).json({ dishList });
   } catch (error) {
+    if (handleModerationError(error, res)) return;
+
     console.error("Create dishlist error:", error);
     res.status(500).json({ error: "Failed to create dishlist" });
   }
@@ -182,6 +196,14 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
         .json({ error: "Cannot change default DishList title" });
     }
 
+    await moderateTextFields(
+      [
+        { label: "DishList title", value: title },
+        { label: "DishList description", value: description },
+      ],
+      { targetType: "DISHLIST", targetId: dishListId, userId }
+    );
+
     // Update
     const updatedDishList = await prisma.dishList.update({
       where: { id: dishListId },
@@ -205,6 +227,8 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
 
     res.json({ dishList: updatedDishList });
   } catch (error) {
+    if (handleModerationError(error, res)) return;
+
     console.error("Update dishlist error:", error);
     res.status(500).json({ error: "Failed to update dishlist" });
   }

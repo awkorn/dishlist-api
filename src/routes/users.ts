@@ -7,14 +7,34 @@ import {
   getBlockContext,
   getBlockStatus,
 } from "../lib/blocks";
+import {
+  handleModerationError,
+  moderateTextFields,
+} from "../lib/moderation";
 
 const router = Router();
+
+function isAllowedAvatarUrl(url: string) {
+  return url.startsWith(
+    `${process.env.SUPABASE_URL}/storage/v1/object/public/avatars/`
+  );
+}
 
 // Register/Login - Create or update user in database
 router.post("/register", authToken, async (req: AuthRequest, res) => {
   try {
     const { email, username, firstName, lastName, bio } = req.body;
     const userId = req.user!.uid;
+
+    await moderateTextFields(
+      [
+        { label: "Username", value: username },
+        { label: "First name", value: firstName },
+        { label: "Last name", value: lastName },
+        { label: "Bio", value: bio },
+      ],
+      { targetType: "USER", targetId: userId, userId }
+    );
 
     // Build update object conditionally
     const updateData: any = {
@@ -67,6 +87,8 @@ router.post("/register", authToken, async (req: AuthRequest, res) => {
 
     res.json({ user });
   } catch (error) {
+    if (handleModerationError(error, res)) return;
+
     console.error("Registration error:", error);
     res.status(400).json({ error: "Failed to create/update user" });
   }
@@ -104,6 +126,16 @@ router.put("/me", authToken, async (req: AuthRequest, res) => {
     const { username, firstName, lastName, bio, avatarUrl } = req.body;
     const userId = req.user!.uid;
 
+    await moderateTextFields(
+      [
+        { label: "Username", value: username },
+        { label: "First name", value: firstName },
+        { label: "Last name", value: lastName },
+        { label: "Bio", value: bio },
+      ],
+      { targetType: "USER", targetId: userId, userId }
+    );
+
     // Validate required fields if provided
     if (username !== undefined && !username?.trim()) {
       return res.status(400).json({ error: "Username cannot be empty" });
@@ -111,6 +143,16 @@ router.put("/me", authToken, async (req: AuthRequest, res) => {
 
     if (firstName !== undefined && !firstName?.trim()) {
       return res.status(400).json({ error: "First name cannot be empty" });
+    }
+
+    if (
+      avatarUrl !== undefined &&
+      avatarUrl !== null &&
+      (!avatarUrl || !isAllowedAvatarUrl(avatarUrl))
+    ) {
+      return res.status(400).json({
+        error: "Profile images must be uploaded through DishList.",
+      });
     }
 
     // If username is being changed, check if it's available
@@ -162,6 +204,8 @@ router.put("/me", authToken, async (req: AuthRequest, res) => {
 
     res.json({ user: updatedUser });
   } catch (error) {
+    if (handleModerationError(error, res)) return;
+
     console.error("Update user profile error:", error);
     res.status(500).json({ error: "Failed to update profile" });
   }

@@ -46,7 +46,55 @@ model User {
   // Push tokens
   pushTokens PushToken[]
 
+  // Moderation
+  submittedReports ContentReport[] @relation("ReportsSubmitted")
+  receivedReports  ContentReport[] @relation("ReportsReceived")
+
   @@map("User")
+}
+
+model ContentReport {
+  id         String               @id @default(cuid())
+  targetType ModerationTargetType
+  targetId   String
+  reason     ContentReportReason
+  details    String?
+  status     ContentReportStatus  @default(PENDING)
+  createdAt  DateTime             @default(now())
+  updatedAt  DateTime             @updatedAt
+  resolvedAt DateTime?
+
+  reporterId String
+  reporter   User   @relation("ReportsSubmitted", fields: [reporterId], references: [uid], onDelete: Cascade)
+
+  ownerId String?
+  owner   User?   @relation("ReportsReceived", fields: [ownerId], references: [uid], onDelete: SetNull)
+
+  @@index([targetType, targetId])
+  @@index([status, createdAt])
+  @@index([reporterId])
+  @@index([ownerId])
+  @@map("ContentReport")
+}
+
+model ModerationReview {
+  id         String               @id @default(cuid())
+  targetType ModerationTargetType
+  targetId   String?
+  userId     String?
+  provider   String
+  model      String
+  inputType  ModerationInputType
+  status     ModerationStatus
+  categories Json?
+  scores     Json?
+  reason     String?
+  createdAt  DateTime             @default(now())
+
+  @@index([targetType, targetId])
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+  @@map("ModerationReview")
 }
 
 model DishList {
@@ -282,4 +330,36 @@ enum NotificationType {
 enum FollowStatus {
   PENDING
   ACCEPTED
+}
+
+enum ModerationTargetType {
+  USER
+  DISHLIST
+  RECIPE
+  IMAGE
+}
+
+enum ModerationInputType {
+  TEXT
+  IMAGE
+}
+
+enum ModerationStatus {
+  APPROVED
+  REJECTED
+  ERROR
+}
+
+enum ContentReportReason {
+  INAPPROPRIATE
+  HARASSMENT
+  SPAM
+  OTHER
+}
+
+enum ContentReportStatus {
+  PENDING
+  REVIEWED
+  ACTIONED
+  DISMISSED
 }
