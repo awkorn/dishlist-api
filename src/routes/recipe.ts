@@ -2,6 +2,7 @@ import { Router } from "express";
 import prisma from "../lib/prisma";
 import { authToken, AuthRequest } from "../middleware/auth";
 import { normalizeTags, validateTags } from "../utils/tags";
+import { areUsersBlocked, filterBlockedRecipientIds } from "../lib/blocks";
 import {
   validateRecipeItems,
   cleanRecipeItems,
@@ -213,6 +214,7 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
 // Get recipe by ID
 router.get("/:id", authToken, async (req: AuthRequest, res) => {
   try {
+    const userId = req.user!.uid;
     const recipe = await prisma.recipe.findUnique({
       where: { id: req.params.id },
       include: {
@@ -228,6 +230,10 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
     });
 
     if (!recipe) {
+      return res.status(404).json({ error: "Recipe not found" });
+    }
+
+    if (await areUsersBlocked(userId, recipe.creatorId)) {
       return res.status(404).json({ error: "Recipe not found" });
     }
 
@@ -292,6 +298,10 @@ router.post("/:id/share", authToken, async (req: AuthRequest, res) => {
       return res.status(404).json({ error: "Recipe not found" });
     }
 
+    if (await areUsersBlocked(userId, recipe.creatorId)) {
+      return res.status(404).json({ error: "Recipe not found" });
+    }
+
     // Verify recipe is on at least one public DishList (shareable)
     const publicDishListEntry = await prisma.dishListRecipe.findFirst({
       where: {
@@ -326,9 +336,18 @@ router.post("/:id/share", authToken, async (req: AuthRequest, res) => {
     // Build sender display name
     const senderName = sender.firstName || sender.username || "Someone";
 
+    const allowedRecipientIds = await filterBlockedRecipientIds(userId, recipientIds);
+    if (allowedRecipientIds.length === 0) {
+      return res.json({
+        success: true,
+        notificationsSent: 0,
+        blocked: recipientIds.length,
+      });
+    }
+
     // Create notifications for all recipients
     const notifications = await prisma.notification.createMany({
-      data: recipientIds.map((recipientId: string) => ({
+      data: allowedRecipientIds.map((recipientId: string) => ({
         type: "RECIPE_SHARED" as const,
         title: `${senderName} shared a recipe with you`,
         message: recipe.title,
@@ -347,6 +366,7 @@ router.post("/:id/share", authToken, async (req: AuthRequest, res) => {
     res.json({
       success: true,
       notificationsSent: notifications.count,
+      blocked: recipientIds.length - allowedRecipientIds.length,
     });
   } catch (error) {
     console.error("Share recipe error:", error);

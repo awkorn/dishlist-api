@@ -2,6 +2,11 @@ import { Router } from "express";
 import prisma from "../lib/prisma";
 import { supabaseAdmin } from "../lib/supabase";
 import { authToken, AuthRequest } from "../middleware/auth";
+import {
+  areUsersBlocked,
+  getBlockedPeerIds,
+  getBlockStatus,
+} from "../lib/blocks";
 
 const router = Router();
 
@@ -201,6 +206,7 @@ router.get("/mutuals", authToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.uid;
     const { search } = req.query;
+    const blockedPeerIds = await getBlockedPeerIds(userId);
 
     // Find users where:
     // 1. Current user follows them (they are in user's "following" list)
@@ -208,6 +214,9 @@ router.get("/mutuals", authToken, async (req: AuthRequest, res) => {
     const mutuals = await prisma.user.findMany({
       where: {
         AND: [
+          {
+            uid: { notIn: blockedPeerIds },
+          },
           // I follow them
           {
             followers: {
@@ -270,6 +279,101 @@ router.get("/mutuals", authToken, async (req: AuthRequest, res) => {
   }
 });
 
+// Block another user
+router.post("/:id/block", authToken, async (req: AuthRequest, res) => {
+  try {
+    const targetUserId = req.params.id;
+    const currentUserId = req.user!.uid;
+
+    if (targetUserId === currentUserId) {
+      return res.status(400).json({ error: "Cannot block yourself" });
+    }
+
+    const targetUser = await prisma.user.findUnique({
+      where: { uid: targetUserId },
+      select: { uid: true },
+    });
+
+    if (!targetUser) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await tx.userBlock.upsert({
+        where: {
+          blockerId_blockedId: {
+            blockerId: currentUserId,
+            blockedId: targetUserId,
+          },
+        },
+        update: {},
+        create: {
+          blockerId: currentUserId,
+          blockedId: targetUserId,
+        },
+      });
+
+      await tx.userFollow.deleteMany({
+        where: {
+          OR: [
+            { followerId: currentUserId, followingId: targetUserId },
+            { followerId: targetUserId, followingId: currentUserId },
+          ],
+        },
+      });
+
+      await tx.notification.deleteMany({
+        where: {
+          OR: [
+            { senderId: currentUserId, receiverId: targetUserId },
+            { senderId: targetUserId, receiverId: currentUserId },
+          ],
+          type: { in: ["FOLLOW_REQUEST", "DISHLIST_INVITATION"] },
+        },
+      });
+
+      await tx.dishListInvite.deleteMany({
+        where: {
+          usedAt: null,
+          OR: [
+            { inviterId: currentUserId, inviteeId: targetUserId },
+            { inviterId: targetUserId, inviteeId: currentUserId },
+          ],
+        },
+      });
+    });
+
+    res.json({ success: true, blockStatus: "BLOCKED_BY_ME" });
+  } catch (error) {
+    console.error("Block user error:", error);
+    res.status(500).json({ error: "Failed to block user" });
+  }
+});
+
+// Unblock another user
+router.delete("/:id/block", authToken, async (req: AuthRequest, res) => {
+  try {
+    const targetUserId = req.params.id;
+    const currentUserId = req.user!.uid;
+
+    if (targetUserId === currentUserId) {
+      return res.status(400).json({ error: "Cannot unblock yourself" });
+    }
+
+    await prisma.userBlock.deleteMany({
+      where: {
+        blockerId: currentUserId,
+        blockedId: targetUserId,
+      },
+    });
+
+    res.json({ success: true, blockStatus: "NONE" });
+  } catch (error) {
+    console.error("Unblock user error:", error);
+    res.status(500).json({ error: "Failed to unblock user" });
+  }
+});
+
 // Get any user's profile by userId
 router.get("/:userId", authToken, async (req: AuthRequest, res) => {
   try {
@@ -300,6 +404,33 @@ router.get("/:userId", authToken, async (req: AuthRequest, res) => {
 
     if (!user) {
       return res.status(404).json({ error: "User not found" });
+    }
+
+    const blockStatus = await getBlockStatus(currentUserId, userId);
+
+    if (blockStatus !== "NONE") {
+      return res.json({
+        user: {
+          uid: user.uid,
+          followerCount: 0,
+          followingCount: 0,
+          isFollowing: false,
+          isOwnProfile: false,
+          followStatus: "NONE",
+          blockStatus,
+        },
+        dishlists: [],
+        recipes: [],
+        recipesMeta: {
+          included: includeRecipes,
+          limit: recipesLimit,
+          offset: recipesOffset,
+          hasMore: false,
+        },
+        dishlistsMeta: {
+          included: includeDishlists,
+        },
+      });
     }
 
     const dishListWhere =
@@ -417,6 +548,7 @@ router.get("/:userId", authToken, async (req: AuthRequest, res) => {
         isFollowing,
         isOwnProfile: userId === currentUserId,
         followStatus,
+        blockStatus,
       },
       dishlists: includeDishlists
         ? dishlists.map((d) => ({
@@ -475,6 +607,10 @@ router.post("/:id/follow", authToken, async (req: AuthRequest, res) => {
 
     if (!targetUser) {
       return res.status(404).json({ error: "User not found" });
+    }
+
+    if (await areUsersBlocked(currentUserId, targetUserId)) {
+      return res.status(403).json({ error: "Cannot follow this user" });
     }
 
     // Check for existing follow/request
@@ -638,6 +774,19 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
+    const blockStatus = await getBlockStatus(currentUserId, userId);
+    if (blockStatus !== "NONE") {
+      return res.json({
+        uid: user.uid,
+        followerCount: 0,
+        followingCount: 0,
+        isOwnProfile: false,
+        isFollowing: false,
+        followStatus: "NONE",
+        blockStatus,
+      });
+    }
+
     // Check follow relationship
     let isFollowing = false;
     let followStatus: "NONE" | "PENDING" | "ACCEPTED" = "NONE";
@@ -673,6 +822,7 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
       isOwnProfile,
       isFollowing,
       followStatus, // NEW: "NONE" | "PENDING" | "ACCEPTED"
+      blockStatus,
     });
   } catch (error) {
     console.error("Get user error:", error);
@@ -685,6 +835,7 @@ router.get("/:userId/followers", authToken, async (req: AuthRequest, res) => {
   try {
     const { userId } = req.params;
     const currentUserId = req.user!.uid;
+    const blockedPeerIds = await getBlockedPeerIds(currentUserId);
 
     // Check user exists
     const targetUser = await prisma.user.findUnique({
@@ -695,11 +846,16 @@ router.get("/:userId/followers", authToken, async (req: AuthRequest, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
+    if (await areUsersBlocked(currentUserId, userId)) {
+      return res.json({ users: [] });
+    }
+
     // Get all accepted followers of this user
     const followers = await prisma.userFollow.findMany({
       where: {
         followingId: userId,
         status: "ACCEPTED",
+        followerId: { notIn: blockedPeerIds },
       },
       include: {
         follower: {
@@ -757,6 +913,8 @@ router.get("/:userId/followers", authToken, async (req: AuthRequest, res) => {
 router.get("/:userId/following", authToken, async (req: AuthRequest, res) => {
   try {
     const { userId } = req.params;
+    const currentUserId = req.user!.uid;
+    const blockedPeerIds = await getBlockedPeerIds(currentUserId);
 
     // Check user exists
     const targetUser = await prisma.user.findUnique({
@@ -767,11 +925,16 @@ router.get("/:userId/following", authToken, async (req: AuthRequest, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
+    if (await areUsersBlocked(currentUserId, userId)) {
+      return res.json({ users: [] });
+    }
+
     // Get all users this person follows (accepted only)
     const following = await prisma.userFollow.findMany({
       where: {
         followerId: userId,
         status: "ACCEPTED",
+        followingId: { notIn: blockedPeerIds },
       },
       include: {
         following: {

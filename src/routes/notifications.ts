@@ -1,6 +1,7 @@
 import express from "express";
 import { authToken, AuthRequest } from "../middleware/auth";
 import prisma from "../lib/prisma";
+import { areUsersBlocked, getBlockedPeerIds } from "../lib/blocks";
 
 const router = express.Router();
 
@@ -8,9 +9,13 @@ const router = express.Router();
 router.get("/", authToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.uid;
+    const blockedPeerIds = await getBlockedPeerIds(userId);
 
     const notifications = await prisma.notification.findMany({
-      where: { receiverId: userId },
+      where: {
+        receiverId: userId,
+        OR: [{ senderId: null }, { senderId: { notIn: blockedPeerIds } }],
+      },
       include: {
         sender: {
           select: {
@@ -36,11 +41,13 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
 router.get("/unread-count", authToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.uid;
+    const blockedPeerIds = await getBlockedPeerIds(userId);
 
     const count = await prisma.notification.count({
       where: {
         receiverId: userId,
         isRead: false,
+        OR: [{ senderId: null }, { senderId: { notIn: blockedPeerIds } }],
       },
     });
 
@@ -165,6 +172,11 @@ router.post("/:id/accept-invitation", authToken, async (req: AuthRequest, res) =
       return res.status(404).json({ error: "Invitation not found" });
     }
 
+    if (notification.senderId && (await areUsersBlocked(userId, notification.senderId))) {
+      await prisma.notification.delete({ where: { id: notificationId } });
+      return res.status(403).json({ error: "Invitation is no longer available" });
+    }
+
     // Parse the data to get dishListId
     const data = notification.data ? JSON.parse(notification.data) : null;
     if (!data?.dishListId) {
@@ -224,21 +236,23 @@ router.post("/:id/accept-invitation", authToken, async (req: AuthRequest, res) =
 
         const accepterName = acceptingUser?.firstName || acceptingUser?.username || "Someone";
 
-        await tx.notification.create({
-          data: {
-            type: "COLLABORATION_ACCEPTED",
-            title: `${accepterName} accepted your invitation`,
-            message: dishList.title,
-            senderId: userId,
-            receiverId: notification.senderId,
-            data: JSON.stringify({
-              dishListId,
-              dishListTitle: dishList.title,
-              userId,
-              userName: accepterName,
-            }),
-          },
-        });
+        if (!(await areUsersBlocked(userId, notification.senderId, tx as any))) {
+          await tx.notification.create({
+            data: {
+              type: "COLLABORATION_ACCEPTED",
+              title: `${accepterName} accepted your invitation`,
+              message: dishList.title,
+              senderId: userId,
+              receiverId: notification.senderId,
+              data: JSON.stringify({
+                dishListId,
+                dishListTitle: dishList.title,
+                userId,
+                userName: accepterName,
+              }),
+            },
+          });
+        }
       }
     });
 
@@ -304,6 +318,20 @@ router.post("/:id/accept-follow", authToken, async (req: AuthRequest, res) => {
       return res.status(400).json({ error: "Invalid follow request" });
     }
 
+    if (await areUsersBlocked(userId, requesterId)) {
+      await prisma.$transaction(async (tx) => {
+        await tx.userFollow.deleteMany({
+          where: {
+            followerId: requesterId,
+            followingId: userId,
+            status: "PENDING",
+          },
+        });
+        await tx.notification.delete({ where: { id: notificationId } });
+      });
+      return res.status(403).json({ error: "Follow request is no longer available" });
+    }
+
     // Find the pending follow relationship
     const followRelation = await prisma.userFollow.findUnique({
       where: {
@@ -348,21 +376,23 @@ router.post("/:id/accept-follow", authToken, async (req: AuthRequest, res) => {
         where: { id: notificationId },
       });
 
-      // Send acceptance notification to requester
-      await tx.notification.create({
-        data: {
-          type: "FOLLOW_ACCEPTED",
-          title: `${accepterName} accepted your follow request`,
-          message: "You are now following them",
-          senderId: userId,
-          receiverId: requesterId,
-          data: JSON.stringify({
-            userId,
-            userName: accepterName,
-            avatarUrl: acceptingUser?.avatarUrl || null,
-          }),
-        },
-      });
+      if (!(await areUsersBlocked(userId, requesterId, tx as any))) {
+        // Send acceptance notification to requester
+        await tx.notification.create({
+          data: {
+            type: "FOLLOW_ACCEPTED",
+            title: `${accepterName} accepted your follow request`,
+            message: "You are now following them",
+            senderId: userId,
+            receiverId: requesterId,
+            data: JSON.stringify({
+              userId,
+              userName: accepterName,
+              avatarUrl: acceptingUser?.avatarUrl || null,
+            }),
+          },
+        });
+      }
     });
 
     res.json({ success: true });
@@ -423,9 +453,13 @@ router.post("/:id/decline-follow", authToken, async (req: AuthRequest, res) => {
 router.get("/", authToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.uid;
+    const blockedPeerIds = await getBlockedPeerIds(userId);
 
     const notifications = await prisma.notification.findMany({
-      where: { receiverId: userId },
+      where: {
+        receiverId: userId,
+        OR: [{ senderId: null }, { senderId: { notIn: blockedPeerIds } }],
+      },
       include: {
         sender: {
           select: {

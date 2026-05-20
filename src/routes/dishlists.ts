@@ -1,6 +1,11 @@
 import { Router } from "express";
 import prisma from "../lib/prisma";
 import { authToken, AuthRequest } from "../middleware/auth";
+import {
+  areUsersBlocked,
+  filterBlockedRecipientIds,
+  getBlockedPeerIds,
+} from "../lib/blocks";
 
 const router = Router();
 
@@ -9,6 +14,7 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.uid;
     const { tab = "all" } = req.query;
+    const blockedPeerIds = await getBlockedPeerIds(userId);
 
     let whereClause: any = {};
 
@@ -39,6 +45,10 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
           ],
         };
     }
+
+    whereClause = {
+      AND: [whereClause, { ownerId: { notIn: blockedPeerIds } }],
+    };
 
     const dishLists = await prisma.dishList.findMany({
       where: whereClause,
@@ -274,6 +284,12 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
       return res.status(404).json({ error: "DishList not found" });
     }
 
+    if (await areUsersBlocked(userId, dishList.ownerId)) {
+      return res.status(404).json({ error: "DishList not found" });
+    }
+
+    const blockedPeerIds = await getBlockedPeerIds(userId);
+
     // Transform response
     const transformedDishList = {
       id: dishList.id,
@@ -289,7 +305,9 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
       isCollaborator: dishList.collaborators.length > 0,
       isFollowing: dishList.followers.length > 0,
       owner: dishList.owner,
-      recipes: dishList.recipes.map((dr) => ({
+      recipes: dishList.recipes
+        .filter((dr) => !blockedPeerIds.includes(dr.recipe.creatorId))
+        .map((dr) => ({
         id: dr.recipe.id,
         title: dr.recipe.title,
         description: dr.recipe.description,
@@ -309,7 +327,7 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
         creator: dr.recipe.creator,
         createdAt: dr.recipe.createdAt,
         updatedAt: dr.recipe.updatedAt,
-      })),
+        })),
       createdAt: dishList.createdAt,
       updatedAt: dishList.updatedAt,
     };
@@ -339,6 +357,10 @@ router.post("/:id/follow", authToken, async (req: AuthRequest, res) => {
 
     if (!dishList) {
       return res.status(404).json({ error: "DishList not found" });
+    }
+
+    if (await areUsersBlocked(userId, dishList.ownerId)) {
+      return res.status(403).json({ error: "Cannot follow this DishList" });
     }
 
     if (dishList.ownerId === userId) {
@@ -678,6 +700,10 @@ router.post("/:id/share", authToken, async (req: AuthRequest, res) => {
       return res.status(404).json({ error: "DishList not found" });
     }
 
+    if (await areUsersBlocked(userId, dishList.ownerId)) {
+      return res.status(404).json({ error: "DishList not found" });
+    }
+
     // Only allow sharing public DishLists
     if (dishList.visibility !== "PUBLIC") {
       return res
@@ -703,9 +729,18 @@ router.post("/:id/share", authToken, async (req: AuthRequest, res) => {
     // Build sender display name
     const senderName = sender.firstName || sender.username || "Someone";
 
+    const allowedRecipientIds = await filterBlockedRecipientIds(userId, recipientIds);
+    if (allowedRecipientIds.length === 0) {
+      return res.json({
+        success: true,
+        notificationsSent: 0,
+        blocked: recipientIds.length,
+      });
+    }
+
     // Create notifications for all recipients
     const notifications = await prisma.notification.createMany({
-      data: recipientIds.map((recipientId: string) => ({
+      data: allowedRecipientIds.map((recipientId: string) => ({
         type: "DISHLIST_SHARED" as const,
         title: `${senderName} shared a DishList with you`,
         message: dishList.title,
@@ -724,6 +759,7 @@ router.post("/:id/share", authToken, async (req: AuthRequest, res) => {
     res.json({
       success: true,
       notificationsSent: notifications.count,
+      blocked: recipientIds.length - allowedRecipientIds.length,
     });
   } catch (error) {
     console.error("Share dishlist error:", error);
@@ -767,10 +803,18 @@ router.get("/:id/collaborators", authToken, async (req: AuthRequest, res) => {
     }
 
     const isOwner = dishList.ownerId === userId;
+    const blockedPeerIds = await getBlockedPeerIds(userId);
+
+    if (blockedPeerIds.includes(dishList.ownerId)) {
+      return res.status(404).json({ error: "DishList not found or access denied" });
+    }
 
     // Get confirmed collaborators
     const collaborators = await prisma.dishListCollaborator.findMany({
-      where: { dishListId },
+      where: {
+        dishListId,
+        userId: { notIn: blockedPeerIds },
+      },
       include: {
         user: {
           select: {
@@ -794,6 +838,7 @@ router.get("/:id/collaborators", authToken, async (req: AuthRequest, res) => {
           usedAt: null,
           expiresAt: { gt: new Date() },
           inviteeId: { not: null }, // Only show direct invites, not link invites
+          NOT: { inviteeId: { in: blockedPeerIds } },
         },
         include: {
           invitee: {
@@ -991,6 +1036,11 @@ router.post(
 
       if (!invite.inviteeId) {
         return res.status(400).json({ error: "Cannot resend link invites" });
+      }
+
+      if (await areUsersBlocked(userId, invite.inviteeId)) {
+        await prisma.dishListInvite.delete({ where: { id: invite.id } });
+        return res.status(403).json({ error: "Cannot resend invite to this user" });
       }
 
       // Get sender info

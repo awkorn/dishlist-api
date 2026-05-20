@@ -1,6 +1,7 @@
 import { Router } from "express";
 import prisma from "../lib/prisma";
 import { authToken, AuthRequest } from "../middleware/auth";
+import { getBlockedPeerIds } from "../lib/blocks";
 
 const router = Router();
 
@@ -511,15 +512,17 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
       });
     }
 
+    const blockedPeerIds = await getBlockedPeerIds(userId);
+
     // Fetch user's social graph for scoring
     const [followingRelations, followerRelations, followedDishLists] =
       await Promise.all([
         prisma.userFollow.findMany({
-          where: { followerId: userId },
+          where: { followerId: userId, followingId: { notIn: blockedPeerIds } },
           select: { followingId: true },
         }),
         prisma.userFollow.findMany({
-          where: { followingId: userId },
+          where: { followingId: userId, followerId: { notIn: blockedPeerIds } },
           select: { followerId: true },
         }),
         prisma.dishListFollower.findMany({
@@ -551,13 +554,14 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
     if (tab === "all") {
       // ALL tab: fetch limited results from each category
       const [users, recipes, dishLists] = await Promise.all([
-        searchUsers(query, userId, followingIds, followerIds, true, 10),
+        searchUsers(query, userId, followingIds, followerIds, blockedPeerIds, true, 10),
         searchRecipes(
           query,
           userId,
           followingIds,
           savedRecipeIds,
           followedDishListIds,
+          blockedPeerIds,
           true,
           10
         ),
@@ -566,6 +570,7 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
           userId,
           followingIds,
           followedDishListIds,
+          blockedPeerIds,
           true,
           10
         ),
@@ -600,6 +605,7 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
         userId,
         followingIds,
         followerIds,
+        blockedPeerIds,
         false,
         pageLimit + 1, // Fetch one extra to check for more
         cursor
@@ -624,6 +630,7 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
         followingIds,
         savedRecipeIds,
         followedDishListIds,
+        blockedPeerIds,
         false,
         pageLimit + 1,
         cursor
@@ -647,6 +654,7 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
         userId,
         followingIds,
         followedDishListIds,
+        blockedPeerIds,
         false,
         pageLimit + 1,
         cursor
@@ -685,6 +693,7 @@ async function searchUsers(
   currentUserId: string,
   followingIds: Set<string>,
   followerIds: Set<string>,
+  blockedPeerIds: string[],
   isAllTab: boolean,
   limit: number,
   cursor?: string
@@ -694,7 +703,7 @@ async function searchUsers(
   // Search users by name or username
   const users = await prisma.user.findMany({
     where: {
-      uid: { not: currentUserId }, // Exclude self
+      uid: { notIn: [currentUserId, ...blockedPeerIds] },
       OR: [
         { username: { contains: query, mode: "insensitive" } },
         { firstName: { contains: query, mode: "insensitive" } },
@@ -745,6 +754,7 @@ async function searchRecipes(
   followingIds: Set<string>,
   savedRecipeIds: Set<string>,
   followedDishListIds: Set<string>,
+  blockedPeerIds: string[],
   isAllTab: boolean,
   limit: number,
   cursor?: string
@@ -754,11 +764,16 @@ async function searchRecipes(
   // Get accessible DishList IDs (public, followed, or collaborator)
   const accessibleDishLists = await prisma.dishList.findMany({
     where: {
-      OR: [
-        { visibility: "PUBLIC" },
-        { ownerId: currentUserId },
-        { collaborators: { some: { userId: currentUserId } } },
-        { followers: { some: { userId: currentUserId } } },
+      AND: [
+        {
+          OR: [
+            { visibility: "PUBLIC" },
+            { ownerId: currentUserId },
+            { collaborators: { some: { userId: currentUserId } } },
+            { followers: { some: { userId: currentUserId } } },
+          ],
+        },
+        { ownerId: { notIn: blockedPeerIds } },
       ],
     },
     select: { id: true },
@@ -774,6 +789,7 @@ async function searchRecipes(
         { tags: { has: query } }, // Exact tag match
         { tags: { hasSome: [query.toLowerCase()] } },
       ],
+      creatorId: { notIn: blockedPeerIds },
       // Must be in an accessible DishList
       dishLists: {
         some: {
@@ -828,6 +844,7 @@ async function searchDishLists(
   currentUserId: string,
   followingIds: Set<string>,
   followedDishListIds: Set<string>,
+  blockedPeerIds: string[],
   isAllTab: boolean,
   limit: number,
   cursor?: string
@@ -847,6 +864,7 @@ async function searchDishLists(
             { followers: { some: { userId: currentUserId } } },
           ],
         },
+        { ownerId: { notIn: blockedPeerIds } },
         // Search criteria
         {
           OR: [

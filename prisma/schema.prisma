@@ -31,6 +31,10 @@ model User {
   followers UserFollow[] @relation("UserFollowers")
   following UserFollow[] @relation("UserFollowing")
 
+  // User blocking relationships
+  blockedUsers UserBlock[] @relation("UserBlocksMade")
+  blockedBy    UserBlock[] @relation("UserBlocksReceived")
+
   // Notifications
   sentNotifications     Notification[] @relation("NotificationSender")
   receivedNotifications Notification[] @relation("NotificationReceiver")
@@ -206,6 +210,22 @@ model UserFollow {
   @@unique([followerId, followingId])
   @@index([followingId, status]) 
   @@map("UserFollow")
+}
+
+model UserBlock {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  blockerId String
+  blocker   User   @relation("UserBlocksMade", fields: [blockerId], references: [uid], onDelete: Cascade)
+
+  blockedId String
+  blocked   User   @relation("UserBlocksReceived", fields: [blockedId], references: [uid], onDelete: Cascade)
+
+  @@unique([blockerId, blockedId])
+  @@index([blockerId])
+  @@index([blockedId])
+  @@map("UserBlock")
 }
 
 model Notification {

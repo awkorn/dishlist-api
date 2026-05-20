@@ -1,6 +1,7 @@
 import { Router } from "express";
 import prisma from "../lib/prisma";
 import { authToken, optionalAuthToken, AuthRequest } from "../middleware/auth";
+import { areUsersBlocked, filterBlockedRecipientIds } from "../lib/blocks";
 
 const router = Router();
 
@@ -73,14 +74,17 @@ router.post("/dishlist/:id/send", authToken, async (req: AuthRequest, res) => {
     const senderName = getDisplayName(sender);
     const expiresAt = getExpiryDate();
 
+    const allowedRecipientIds = await filterBlockedRecipientIds(userId, recipientIds);
+
     // Process each recipient
     const results = {
       invited: 0,
       alreadyCollaborator: 0,
       resent: 0,
+      blocked: recipientIds.length - allowedRecipientIds.length,
     };
 
-    for (const recipientId of recipientIds) {
+    for (const recipientId of allowedRecipientIds) {
       // Skip if trying to invite yourself
       if (recipientId === userId) continue;
 
@@ -181,6 +185,7 @@ router.post("/dishlist/:id/send", authToken, async (req: AuthRequest, res) => {
       invited: results.invited,
       resent: results.resent,
       alreadyCollaborator: results.alreadyCollaborator,
+      blocked: results.blocked,
     });
   } catch (error) {
     console.error("Send invite error:", error);
@@ -251,6 +256,7 @@ router.post("/:token/validate", optionalAuthToken, async (req: AuthRequest, res)
             title: true,
             description: true,
             visibility: true,
+            ownerId: true,
           },
         },
         inviter: {
@@ -292,7 +298,17 @@ router.post("/:token/validate", optionalAuthToken, async (req: AuthRequest, res)
     let isOwner = false;
 
     if (userId) {
-      isOwner = invite.dishList.id === userId;
+      isOwner = invite.dishList.ownerId === userId;
+
+      if (
+        (await areUsersBlocked(userId, invite.inviterId)) ||
+        (await areUsersBlocked(userId, invite.dishList.ownerId))
+      ) {
+        return res.status(403).json({
+          error: "This invite is no longer available",
+          code: "BLOCKED",
+        });
+      }
 
       const existingCollab = await prisma.dishListCollaborator.findUnique({
         where: {
@@ -366,6 +382,16 @@ router.post("/:token/accept", authToken, async (req: AuthRequest, res) => {
       return res.status(400).json({ error: "You cannot collaborate on your own DishList", code: "IS_OWNER" });
     }
 
+    if (
+      (await areUsersBlocked(userId, invite.inviterId)) ||
+      (await areUsersBlocked(userId, invite.dishList.ownerId))
+    ) {
+      return res.status(403).json({
+        error: "This invite is no longer available",
+        code: "BLOCKED",
+      });
+    }
+
     // Check if already collaborator
     const existingCollab = await prisma.dishListCollaborator.findUnique({
       where: {
@@ -433,22 +459,24 @@ router.post("/:token/accept", authToken, async (req: AuthRequest, res) => {
         },
       });
 
-      // Notify the inviter
-      await tx.notification.create({
-        data: {
-          type: "COLLABORATION_ACCEPTED",
-          title: `${accepterName} accepted your invitation`,
-          message: invite.dishList.title,
-          senderId: userId,
-          receiverId: invite.inviterId,
-          data: JSON.stringify({
-            dishListId: invite.dishListId,
-            dishListTitle: invite.dishList.title,
-            userId,
-            userName: accepterName,
-          }),
-        },
-      });
+      if (!(await areUsersBlocked(userId, invite.inviterId, tx as any))) {
+        // Notify the inviter
+        await tx.notification.create({
+          data: {
+            type: "COLLABORATION_ACCEPTED",
+            title: `${accepterName} accepted your invitation`,
+            message: invite.dishList.title,
+            senderId: userId,
+            receiverId: invite.inviterId,
+            data: JSON.stringify({
+              dishListId: invite.dishListId,
+              dishListTitle: invite.dishList.title,
+              userId,
+              userName: accepterName,
+            }),
+          },
+        });
+      }
     });
 
     res.json({
