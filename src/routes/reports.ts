@@ -61,6 +61,12 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
       return res.status(400).json({ error: "You cannot report yourself" });
     }
 
+    if (ownerId === reporterId) {
+      return res
+        .status(400)
+        .json({ error: "You cannot report your own content" });
+    }
+
     const report = await prisma.contentReport.create({
       data: {
         targetType,
