@@ -13,11 +13,130 @@ import {
 } from "../lib/moderation";
 
 const router = Router();
+const USER_STORAGE_BUCKETS = ["avatars", "recipes"] as const;
 
 function isAllowedAvatarUrl(url: string) {
   return url.startsWith(
     `${process.env.SUPABASE_URL}/storage/v1/object/public/avatars/`
   );
+}
+
+async function listStorageObjectPaths(bucket: string, prefix: string) {
+  const paths: string[] = [];
+  const pageSize = 100;
+  let offset = 0;
+
+  while (true) {
+    const { data, error } = await supabaseAdmin.storage
+      .from(bucket)
+      .list(prefix, {
+        limit: pageSize,
+        offset,
+        sortBy: { column: "name", order: "asc" },
+      });
+
+    if (error) {
+      throw new Error(`Failed to list ${bucket} images: ${error.message}`);
+    }
+
+    const items = data || [];
+    for (const item of items) {
+      const path = `${prefix}/${item.name}`;
+
+      if ((item as any).id === null) {
+        paths.push(...(await listStorageObjectPaths(bucket, path)));
+      } else {
+        paths.push(path);
+      }
+    }
+
+    if (items.length < pageSize) break;
+    offset += pageSize;
+  }
+
+  return paths;
+}
+
+async function deleteStorageObjects(bucket: string, paths: string[]) {
+  if (paths.length === 0) return;
+
+  const { error } = await supabaseAdmin.storage.from(bucket).remove(paths);
+  if (error) {
+    throw new Error(`Failed to delete ${bucket} images: ${error.message}`);
+  }
+}
+
+async function deleteUserStorageObjects(userId: string) {
+  await Promise.all(
+    USER_STORAGE_BUCKETS.map(async (bucket) => {
+      const paths = await listStorageObjectPaths(bucket, userId);
+      await deleteStorageObjects(bucket, paths);
+    })
+  );
+}
+
+async function deleteUserModerationAndReportRecords(userId: string) {
+  const [dishLists, recipes] = await Promise.all([
+    prisma.dishList.findMany({
+      where: { ownerId: userId },
+      select: { id: true },
+    }),
+    prisma.recipe.findMany({
+      where: { creatorId: userId },
+      select: { id: true },
+    }),
+  ]);
+
+  const dishListIds = dishLists.map((dishList) => dishList.id);
+  const recipeIds = recipes.map((recipe) => recipe.id);
+
+  await prisma.$transaction([
+    prisma.contentReport.deleteMany({
+      where: {
+        OR: [
+          { reporterId: userId },
+          { ownerId: userId },
+          { targetType: "USER", targetId: userId },
+          { targetType: "DISHLIST", targetId: { in: dishListIds } },
+          { targetType: "RECIPE", targetId: { in: recipeIds } },
+        ],
+      },
+    }),
+    prisma.moderationReview.deleteMany({
+      where: {
+        OR: [
+          { userId },
+          { targetType: "USER", targetId: userId },
+          { targetType: "DISHLIST", targetId: { in: dishListIds } },
+          { targetType: "RECIPE", targetId: { in: recipeIds } },
+        ],
+      },
+    }),
+  ]);
+}
+
+function isAuthUserNotFound(error: { message?: string; status?: number }) {
+  return (
+    error.status === 404 ||
+    /user.*not found|not found.*user|does not exist/i.test(error.message || "")
+  );
+}
+
+async function deleteSupabaseAuthUser(userId: string) {
+  const { error } = await supabaseAdmin.auth.admin.deleteUser(userId);
+
+  if (error && !isAuthUserNotFound(error)) {
+    throw new Error(`Failed to delete Supabase Auth user: ${error.message}`);
+  }
+}
+
+async function cleanupUserGeneratedData(userId: string) {
+  // Supabase Storage is outside Prisma's cascade graph, so remove uploaded
+  // avatars/recipe photos first. This keeps account deletion from leaving
+  // orphaned public images if the database delete succeeds.
+  await deleteUserStorageObjects(userId);
+
+  await deleteUserModerationAndReportRecords(userId);
 }
 
 // Register/Login - Create or update user in database
@@ -221,22 +340,16 @@ router.delete("/me", authToken, async (req: AuthRequest, res) => {
       where: { uid: userId },
     });
 
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
+    await cleanupUserGeneratedData(userId);
+
+    if (user) {
+      // Delete user from database (cascades handle related data)
+      await prisma.user.delete({
+        where: { uid: userId },
+      });
     }
 
-    // Delete user from database (cascades handle related data)
-    await prisma.user.delete({
-      where: { uid: userId },
-    });
-
-    // Delete user from Supabase Auth
-    const { error: authError } = await supabaseAdmin.auth.admin.deleteUser(userId);
-
-    if (authError) {
-      console.error("Failed to delete Supabase Auth user:", authError);
-      // User data is already deleted from DB — log but don't fail the response
-    }
+    await deleteSupabaseAuthUser(userId);
 
     res.json({ success: true, message: "Account deleted successfully" });
   } catch (error) {
