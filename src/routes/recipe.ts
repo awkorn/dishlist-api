@@ -95,6 +95,15 @@ function recipeWithImageUrls<T extends { imageUrl?: string | null }>(
   };
 }
 
+function getShareableRecipeEntryWhere(recipeId: string) {
+  return {
+    recipeId,
+    dishList: {
+      visibility: "PUBLIC" as const,
+    },
+  };
+}
+
 function normalizeRecipeNotes(
   notes: unknown
 ): { notes?: string[]; error?: string } {
@@ -292,17 +301,13 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
       return res.status(404).json({ error: "Recipe not found" });
     }
 
-    // Check if recipe is on any public DishList (makes it shareable)
-    const publicDishListEntry = await prisma.dishListRecipe.findFirst({
-      where: {
-        recipeId: recipe.id,
-        dishList: {
-          visibility: "PUBLIC",
-        },
-      },
+    // Direct recipe shares must remain accessible to recipients without
+    // granting access to private DishLists.
+    const shareableDishListEntry = await prisma.dishListRecipe.findFirst({
+      where: getShareableRecipeEntryWhere(recipe.id),
     });
 
-    const isShareable = publicDishListEntry !== null;
+    const isShareable = shareableDishListEntry !== null;
 
     res.json({
       recipe: {
@@ -359,17 +364,12 @@ router.post("/:id/share", authToken, async (req: AuthRequest, res) => {
       return res.status(404).json({ error: "Recipe not found" });
     }
 
-    // Verify recipe is on at least one public DishList (shareable)
-    const publicDishListEntry = await prisma.dishListRecipe.findFirst({
-      where: {
-        recipeId: recipe.id,
-        dishList: {
-          visibility: "PUBLIC",
-        },
-      },
+    // Verify recipe is on at least one public DishList (shareable).
+    const shareableDishListEntry = await prisma.dishListRecipe.findFirst({
+      where: getShareableRecipeEntryWhere(recipe.id),
     });
 
-    if (!publicDishListEntry) {
+    if (!shareableDishListEntry) {
       return res
         .status(403)
         .json({ error: "Only recipes on public DishLists can be shared" });
