@@ -53,6 +53,19 @@ model User {
   @@map("User")
 }
 
+// Durable tombstone for account deletion. This intentionally has no foreign
+// key to User so it survives deletion and blocks stale JWTs from recreating an
+// account if an external Supabase cleanup step needs to be retried.
+model AccountDeletion {
+  userId      String    @id
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  completedAt DateTime?
+  lastError   String?
+
+  @@map("AccountDeletion")
+}
+
 model ContentReport {
   id         String               @id @default(cuid())
   targetType ModerationTargetType

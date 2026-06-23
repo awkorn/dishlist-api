@@ -1,38 +1,71 @@
 import { Request, Response, NextFunction } from "express";
-import jwt from "jsonwebtoken";
-import jwksClient from "jwks-rsa";
-
-// Supabase JWKS endpoint — public keys for verifying asymmetric JWTs
-const client = jwksClient({
-  jwksUri: `${process.env.SUPABASE_URL}/auth/v1/.well-known/jwks.json`,
-  cache: true,             
-  cacheMaxAge: 600000,      // Cache for 10 minutes (matches Supabase edge cache)
-  rateLimit: true,
-  jwksRequestsPerMinute: 10,
-});
+import prisma from "../lib/prisma";
+import { supabaseAdmin } from "../lib/supabase";
 
 if (!process.env.SUPABASE_URL) {
   throw new Error("Missing SUPABASE_URL environment variable");
 }
 
-// Callback for jsonwebtoken — fetches the correct public key by kid
-function getKey(
-  header: jwt.JwtHeader,
-  callback: (err: Error | null, key?: string) => void
-) {
-  client.getSigningKey(header.kid, (err, key) => {
-    if (err) {
-      return callback(err);
-    }
-    const signingKey = key?.getPublicKey();
-    callback(null, signingKey);
-  });
-}
+const supabaseUrl = process.env.SUPABASE_URL.replace(/\/+$/, "");
+const expectedIssuer = `${supabaseUrl}/auth/v1`;
 
-interface SupabaseJwtPayload extends jwt.JwtPayload {
+interface SupabaseJwtPayload {
   sub: string;
+  iss?: string;
+  aud?: string | string[];
   email?: string;
   role?: string;
+}
+
+function getBearerToken(req: Request) {
+  const authorization = req.headers.authorization;
+  if (!authorization) return null;
+
+  const match = authorization.match(/^Bearer ([^\s]+)$/i);
+  return match?.[1] ?? null;
+}
+
+async function verifyAuthToken(token: string) {
+  // getClaims verifies asymmetric tokens against the project's cached JWKS and
+  // safely falls back to the Auth server for legacy HS256 projects.
+  const { data, error } = await supabaseAdmin.auth.getClaims(token);
+  if (error || !data?.claims) {
+    throw error || new Error("JWT claims are unavailable");
+  }
+
+  const decoded = data.claims as SupabaseJwtPayload;
+  const hasExpectedAudience = Array.isArray(decoded.aud)
+    ? decoded.aud.includes("authenticated")
+    : decoded.aud === "authenticated";
+
+  if (
+    !decoded.sub ||
+    decoded.iss !== expectedIssuer ||
+    !hasExpectedAudience ||
+    decoded.role !== "authenticated"
+  ) {
+    throw new Error("JWT does not represent an authenticated user");
+  }
+
+  return decoded;
+}
+
+function isAccountDeletionRetry(req: Request) {
+  return (
+    req.method === "DELETE" &&
+    req.baseUrl === "/users" &&
+    req.path === "/me"
+  );
+}
+
+async function isAccountDeletionBlocked(userId: string, req: Request) {
+  if (isAccountDeletionRetry(req)) return false;
+
+  const deletion = await prisma.accountDeletion.findUnique({
+    where: { userId },
+    select: { userId: true },
+  });
+  return !!deletion;
 }
 
 export interface AuthRequest extends Request {
@@ -48,17 +81,15 @@ export const authToken = async (
   next: NextFunction
 ) => {
   try {
-    const token = req.headers.authorization?.split(" ")[1];
+    const token = getBearerToken(req);
     if (!token) {
       return res.status(401).json({ message: "No token provided" });
     }
 
-    const decoded = await new Promise<SupabaseJwtPayload>((resolve, reject) => {
-      jwt.verify(token, getKey, { algorithms: ["ES256"] }, (err, payload) => {
-        if (err) reject(err);
-        else resolve(payload as SupabaseJwtPayload);
-      });
-    });
+    const decoded = await verifyAuthToken(token);
+    if (await isAccountDeletionBlocked(decoded.sub, req)) {
+      return res.status(410).json({ error: "Account deletion is in progress" });
+    }
 
     req.user = {
       uid: decoded.sub,
@@ -77,17 +108,15 @@ export const optionalAuthToken = async (
   next: NextFunction
 ) => {
   try {
-    const token = req.headers.authorization?.split(" ")[1];
+    const token = getBearerToken(req);
     if (!token) {
       return next();
     }
 
-    const decoded = await new Promise<SupabaseJwtPayload>((resolve, reject) => {
-      jwt.verify(token, getKey, { algorithms: ["ES256"] }, (err, payload) => {
-        if (err) reject(err);
-        else resolve(payload as SupabaseJwtPayload);
-      });
-    });
+    const decoded = await verifyAuthToken(token);
+    if (await isAccountDeletionBlocked(decoded.sub, req)) {
+      return next();
+    }
 
     req.user = {
       uid: decoded.sub,

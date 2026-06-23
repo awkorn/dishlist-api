@@ -75,7 +75,7 @@ async function deleteUserStorageObjects(userId: string) {
   );
 }
 
-async function deleteUserModerationAndReportRecords(userId: string) {
+async function deleteUserDatabaseRecords(userId: string) {
   const [dishLists, recipes] = await Promise.all([
     prisma.dishList.findMany({
       where: { ownerId: userId },
@@ -112,6 +112,9 @@ async function deleteUserModerationAndReportRecords(userId: string) {
         ],
       },
     }),
+    prisma.user.deleteMany({
+      where: { uid: userId },
+    }),
   ]);
 }
 
@@ -130,20 +133,32 @@ async function deleteSupabaseAuthUser(userId: string) {
   }
 }
 
-async function cleanupUserGeneratedData(userId: string) {
-  // Supabase Storage is outside Prisma's cascade graph, so remove uploaded
-  // avatars/recipe photos first. This keeps account deletion from leaving
-  // orphaned public images if the database delete succeeds.
-  await deleteUserStorageObjects(userId);
+async function banSupabaseAuthUser(userId: string) {
+  const { error } = await supabaseAdmin.auth.admin.updateUserById(userId, {
+    ban_duration: "876000h",
+  });
 
-  await deleteUserModerationAndReportRecords(userId);
+  if (error && !isAuthUserNotFound(error)) {
+    throw new Error(`Failed to disable Supabase Auth user: ${error.message}`);
+  }
 }
 
 // Register/Login - Create or update user in database
 router.post("/register", authToken, async (req: AuthRequest, res) => {
+  let shouldRollbackAuthUser = false;
+
   try {
-    const { email, username, firstName, lastName, bio } = req.body;
+    const { username, firstName, lastName, bio } = req.body;
     const userId = req.user!.uid;
+    const email = req.user?.email?.trim().toLowerCase();
+    if (!email) {
+      return res.status(400).json({ error: "Authenticated email is required" });
+    }
+    const existingUser = await prisma.user.findUnique({
+      where: { uid: userId },
+      select: { uid: true },
+    });
+    shouldRollbackAuthUser = !existingUser;
 
     await moderateTextFields(
       [
@@ -177,35 +192,47 @@ router.post("/register", authToken, async (req: AuthRequest, res) => {
       bio: bio || null,
     };
 
-    // Create or update user in your database
-    const user = await prisma.user.upsert({
-      where: { uid: userId },
-      update: updateData,
-      create: createData,
-    });
+    // Keep profile and default-list creation atomic. If either fails for a
+    // brand-new signup, the catch block also removes the Supabase auth user.
+    const user = await prisma.$transaction(async (transaction) => {
+      const registeredUser = await transaction.user.upsert({
+        where: { uid: userId },
+        update: updateData,
+        create: createData,
+      });
 
-    // Create default "My Recipes" DishList for new users
-    const defaultDishList = await prisma.dishList.findFirst({
-      where: {
-        ownerId: user.uid,
-        isDefault: true,
-      },
-    });
-
-    if (!defaultDishList) {
-      await prisma.dishList.create({
-        data: {
-          title: "My Recipes",
-          description: "Your personal recipe collection",
-          ownerId: user.uid,
+      const defaultDishList = await transaction.dishList.findFirst({
+        where: {
+          ownerId: registeredUser.uid,
           isDefault: true,
-          visibility: "PRIVATE",
         },
       });
-    }
+
+      if (!defaultDishList) {
+        await transaction.dishList.create({
+          data: {
+            title: "My Recipes",
+            description: "Your personal recipe collection",
+            ownerId: registeredUser.uid,
+            isDefault: true,
+            visibility: "PRIVATE",
+          },
+        });
+      }
+
+      return registeredUser;
+    });
 
     res.json({ user });
   } catch (error) {
+    if (shouldRollbackAuthUser && req.user?.uid) {
+      try {
+        await deleteSupabaseAuthUser(req.user.uid);
+      } catch (rollbackError) {
+        console.error("Registration rollback error:", rollbackError);
+      }
+    }
+
     if (handleModerationError(error, res)) return;
 
     console.error("Registration error:", error);
@@ -236,6 +263,41 @@ router.get("/me", authToken, async (req: AuthRequest, res) => {
   } catch (error) {
     console.error("Get user error:", error);
     res.status(500).json({ error: "Failed to fetch user" });
+  }
+});
+
+// Sync the application profile after Supabase confirms an email change.
+// The email comes from the verified JWT, never from the request body.
+router.patch("/me", authToken, async (req: AuthRequest, res) => {
+  try {
+    const {
+      data: { user: authUser },
+      error: authError,
+    } = await supabaseAdmin.auth.admin.getUserById(req.user!.uid);
+    if (authError) throw authError;
+
+    const email = authUser?.email?.trim().toLowerCase();
+    if (!email) {
+      return res.status(400).json({ error: "Authenticated email is required" });
+    }
+
+    const user = await prisma.user.update({
+      where: { uid: req.user!.uid },
+      data: { email },
+      include: {
+        _count: {
+          select: {
+            followers: { where: { status: "ACCEPTED" } },
+            following: { where: { status: "ACCEPTED" } },
+          },
+        },
+      },
+    });
+
+    res.json({ user });
+  } catch (error) {
+    console.error("Sync user email error:", error);
+    res.status(500).json({ error: "Failed to sync email" });
   }
 });
 
@@ -332,29 +394,60 @@ router.put("/me", authToken, async (req: AuthRequest, res) => {
 
 // Delete current user's account and all associated data
 router.delete("/me", authToken, async (req: AuthRequest, res) => {
-  try {
-    const userId = req.user!.uid;
+  const userId = req.user!.uid;
 
-    // Verify user exists
-    const user = await prisma.user.findUnique({
-      where: { uid: userId },
+  try {
+    const deletion = await prisma.accountDeletion.upsert({
+      where: { userId },
+      create: { userId },
+      update: { lastError: null },
     });
 
-    await cleanupUserGeneratedData(userId);
-
-    if (user) {
-      // Delete user from database (cascades handle related data)
-      await prisma.user.delete({
-        where: { uid: userId },
+    if (deletion.completedAt) {
+      return res.json({
+        success: true,
+        message: "Account deleted successfully",
       });
     }
 
+    // The durable marker above immediately blocks every API route except this
+    // idempotent retry. Banning the auth user also prevents new sessions while
+    // storage, database, and Supabase cleanup complete.
+    await banSupabaseAuthUser(userId);
+    await deleteUserStorageObjects(userId);
+    await deleteUserDatabaseRecords(userId);
     await deleteSupabaseAuthUser(userId);
+
+    await prisma.accountDeletion.update({
+      where: { userId },
+      data: {
+        completedAt: new Date(),
+        lastError: null,
+      },
+    });
 
     res.json({ success: true, message: "Account deleted successfully" });
   } catch (error) {
     console.error("Delete account error:", error);
-    res.status(500).json({ error: "Failed to delete account" });
+    await prisma.accountDeletion
+      .upsert({
+        where: { userId },
+        create: {
+          userId,
+          lastError: error instanceof Error ? error.message : "Unknown error",
+        },
+        update: {
+          lastError: error instanceof Error ? error.message : "Unknown error",
+        },
+      })
+      .catch((markerError) =>
+        console.error("Failed to record account deletion error:", markerError)
+      );
+
+    res.status(500).json({
+      error:
+        "Account deletion could not finish. Your account is locked; please retry.",
+    });
   }
 });
 
