@@ -258,7 +258,6 @@ router.post("/:token/validate", optionalAuthToken, async (req: AuthRequest, res)
           select: {
             id: true,
             title: true,
-            description: true,
             visibility: true,
             ownerId: true,
           },

@@ -212,7 +212,6 @@ router.post("/register", authToken, async (req: AuthRequest, res) => {
         await transaction.dishList.create({
           data: {
             title: "My Recipes",
-            description: "Your personal recipe collection",
             ownerId: registeredUser.uid,
             isDefault: true,
             visibility: "PRIVATE",
@@ -805,7 +804,6 @@ router.get("/:userId", authToken, async (req: AuthRequest, res) => {
         ? dishlists.map((d) => ({
             id: d.id,
             title: d.title,
-            description: d.description,
             visibility: d.visibility,
             isDefault: d.isDefault,
             isPinned: d.pins.length > 0,

@@ -43,7 +43,6 @@ interface ScoredRecipe {
 interface ScoredDishList {
   id: string;
   title: string;
-  description: string | null;
   visibility: string;
   recipeCount: number;
   followerCount: number;
@@ -425,14 +424,6 @@ function scoreDishList(
     }
   }
 
-  // Description matching
-  score += calculateTextScore(query, dishList.description, {
-    exact: 25,
-    startsWith: 20,
-    wordMatch: 18,
-    contains: 15,
-  });
-
   const isFollowing = followedDishListIds.has(dishList.id);
   const isCollaborator = dishList.collaborators?.some(
     (c: any) => c.userId === currentUserId
@@ -469,7 +460,6 @@ function scoreDishList(
   return {
     id: dishList.id,
     title: dishList.title,
-    description: dishList.description,
     visibility: dishList.visibility,
     recipeCount: dishList._count?.recipes || 0,
     followerCount,
@@ -868,7 +858,6 @@ async function searchDishLists(
         {
           OR: [
             { title: { contains: query, mode: "insensitive" } },
-            { description: { contains: query, mode: "insensitive" } },
             {
               owner: {
                 OR: [

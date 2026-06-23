@@ -115,7 +115,6 @@ model ModerationReview {
 model DishList {
   id          String             @id @default(cuid())
   title       String
-  description String?
   visibility  DishListVisibility @default(PUBLIC)
   isDefault   Boolean            @default(false)
   createdAt   DateTime           @default(now())

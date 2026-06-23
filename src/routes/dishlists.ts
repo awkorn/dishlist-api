@@ -103,7 +103,6 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
     const transformedLists = dishLists.map((list) => ({
       id: list.id,
       title: list.title,
-      description: list.description,
       visibility: list.visibility,
       isDefault: list.isDefault,
       isPinned: list.pins.length > 0,
@@ -133,25 +132,21 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
 // Create new dishlist
 router.post("/", authToken, async (req: AuthRequest, res) => {
   try {
-    const { title, description, visibility = "PUBLIC" } = req.body;
+    const { title, visibility = "PUBLIC" } = req.body;
     const userId = req.user!.uid;
 
     if (!title?.trim()) {
       return res.status(400).json({ error: "Title is required" });
     }
 
-    await moderateTextFields(
-      [
-        { label: "DishList title", value: title },
-        { label: "DishList description", value: description },
-      ],
-      { targetType: "DISHLIST", userId }
-    );
+    await moderateTextFields([{ label: "DishList title", value: title }], {
+      targetType: "DISHLIST",
+      userId,
+    });
 
     const dishList = await prisma.dishList.create({
       data: {
         title: title.trim(),
-        description: description?.trim() || null,
         visibility,
         ownerId: userId,
         isDefault: false,
@@ -183,7 +178,7 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
   try {
     const dishListId = req.params.id;
     const userId = req.user!.uid;
-    const { title, description, visibility } = req.body;
+    const { title, visibility } = req.body;
 
     if (!title?.trim()) {
       return res.status(400).json({ error: "Title is required" });
@@ -212,13 +207,11 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
         .json({ error: "Cannot change default DishList title" });
     }
 
-    await moderateTextFields(
-      [
-        { label: "DishList title", value: title },
-        { label: "DishList description", value: description },
-      ],
-      { targetType: "DISHLIST", targetId: dishListId, userId }
-    );
+    await moderateTextFields([{ label: "DishList title", value: title }], {
+      targetType: "DISHLIST",
+      targetId: dishListId,
+      userId,
+    });
 
     const nextVisibility = visibility || existingDishList.visibility;
 
@@ -227,7 +220,6 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
         where: { id: dishListId },
         data: {
           title: title.trim(),
-          description: description?.trim() || null,
           visibility: nextVisibility,
         },
         include: {
@@ -345,7 +337,6 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
     const transformedDishList = {
       id: dishList.id,
       title: dishList.title,
-      description: dishList.description,
       visibility: dishList.visibility,
       isDefault: dishList.isDefault,
       isPinned: dishList.pins.length > 0,
