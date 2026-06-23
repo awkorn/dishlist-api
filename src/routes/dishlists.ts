@@ -18,6 +18,45 @@ import { copyRecipeImagesForFork } from "../lib/recipeImages";
 
 const router = Router();
 
+type DishListSummarySource = {
+  id: string;
+  title: string;
+  visibility: "PUBLIC" | "PRIVATE";
+  isDefault: boolean;
+  ownerId: string;
+  owner: {
+    uid: string;
+    username: string | null;
+    firstName: string | null;
+    lastName: string | null;
+  };
+  createdAt: Date;
+  updatedAt: Date;
+  _count: {
+    recipes: number;
+  };
+  collaborators: Array<{ userId: string }>;
+  followers: Array<{ userId: string }>;
+  pins: Array<{ userId: string }>;
+};
+
+function toDishListSummary(list: DishListSummarySource, userId: string) {
+  return {
+    id: list.id,
+    title: list.title,
+    visibility: list.visibility,
+    isDefault: list.isDefault,
+    isPinned: list.pins.length > 0,
+    recipeCount: list._count.recipes,
+    isOwner: list.ownerId === userId,
+    isCollaborator: list.collaborators.length > 0,
+    isFollowing: list.followers.length > 0,
+    owner: list.owner,
+    createdAt: list.createdAt,
+    updatedAt: list.updatedAt,
+  };
+}
+
 // Get user's dishlists with proper filtering
 router.get("/", authToken, async (req: AuthRequest, res) => {
   try {
@@ -100,20 +139,9 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
     });
 
     // Transform data for frontend
-    const transformedLists = dishLists.map((list) => ({
-      id: list.id,
-      title: list.title,
-      visibility: list.visibility,
-      isDefault: list.isDefault,
-      isPinned: list.pins.length > 0,
-      recipeCount: list._count.recipes,
-      isOwner: list.ownerId === userId,
-      isCollaborator: list.collaborators.length > 0,
-      isFollowing: list.followers.length > 0,
-      owner: list.owner,
-      createdAt: list.createdAt,
-      updatedAt: list.updatedAt,
-    }));
+    const transformedLists = dishLists.map((list) =>
+      toDishListSummary(list, userId),
+    );
 
     // Sort: default first, then pinned, then by updatedAt
     transformedLists.sort((a, b) => {
@@ -161,10 +189,24 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
             lastName: true,
           },
         },
+        pins: {
+          where: { userId },
+          select: { userId: true },
+        },
+        collaborators: {
+          where: { userId },
+          select: { userId: true },
+        },
+        followers: {
+          where: { userId },
+          select: { userId: true },
+        },
       },
     });
 
-    res.status(201).json({ dishList });
+    res.status(201).json({
+      dishList: toDishListSummary(dishList, userId),
+    });
   } catch (error) {
     if (handleModerationError(error, res)) return;
 
@@ -232,6 +274,18 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
               lastName: true,
             },
           },
+          pins: {
+            where: { userId },
+            select: { userId: true },
+          },
+          collaborators: {
+            where: { userId },
+            select: { userId: true },
+          },
+          followers: {
+            where: { userId },
+            select: { userId: true },
+          },
         },
       });
 
@@ -244,7 +298,9 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
       return updated;
     });
 
-    res.json({ dishList: updatedDishList });
+    res.json({
+      dishList: toDishListSummary(updatedDishList, userId),
+    });
   } catch (error) {
     if (handleModerationError(error, res)) return;
 
