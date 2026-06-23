@@ -761,7 +761,8 @@ async function searchRecipes(
 ): Promise<ScoredRecipe[]> {
   const minScore = 30;
 
-  // Get accessible DishList IDs (public, followed, or collaborator)
+  // Following never grants access to a private DishList. A stale follower row
+  // must not make the list or its recipes searchable.
   const accessibleDishLists = await prisma.dishList.findMany({
     where: {
       AND: [
@@ -770,7 +771,6 @@ async function searchRecipes(
             { visibility: "PUBLIC" },
             { ownerId: currentUserId },
             { collaborators: { some: { userId: currentUserId } } },
-            { followers: { some: { userId: currentUserId } } },
           ],
         },
         { ownerId: { notIn: blockedPeerIds } },
@@ -861,7 +861,6 @@ async function searchDishLists(
             { visibility: "PUBLIC" },
             { ownerId: currentUserId },
             { collaborators: { some: { userId: currentUserId } } },
-            { followers: { some: { userId: currentUserId } } },
           ],
         },
         { ownerId: { notIn: blockedPeerIds } },

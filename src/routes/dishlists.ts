@@ -50,7 +50,17 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
     }
 
     whereClause = {
-      AND: [whereClause, { ownerId: { notIn: blockedPeerIds } }],
+      AND: [
+        whereClause,
+        { ownerId: { notIn: blockedPeerIds } },
+        {
+          OR: [
+            { visibility: "PUBLIC" },
+            { ownerId: userId },
+            { collaborators: { some: { userId } } },
+          ],
+        },
+      ],
     };
 
     const dishLists = await prisma.dishList.findMany({
@@ -204,25 +214,36 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
       { targetType: "DISHLIST", targetId: dishListId, userId }
     );
 
-    // Update
-    const updatedDishList = await prisma.dishList.update({
-      where: { id: dishListId },
-      data: {
-        title: title.trim(),
-        description: description?.trim() || null,
-        visibility: visibility || existingDishList.visibility,
-      },
-      include: {
-        _count: { select: { recipes: true } },
-        owner: {
-          select: {
-            uid: true,
-            username: true,
-            firstName: true,
-            lastName: true,
+    const nextVisibility = visibility || existingDishList.visibility;
+
+    const updatedDishList = await prisma.$transaction(async (tx) => {
+      const updated = await tx.dishList.update({
+        where: { id: dishListId },
+        data: {
+          title: title.trim(),
+          description: description?.trim() || null,
+          visibility: nextVisibility,
+        },
+        include: {
+          _count: { select: { recipes: true } },
+          owner: {
+            select: {
+              uid: true,
+              username: true,
+              firstName: true,
+              lastName: true,
+            },
           },
         },
-      },
+      });
+
+      if (nextVisibility === "PRIVATE") {
+        await tx.dishListFollower.deleteMany({
+          where: { dishListId },
+        });
+      }
+
+      return updated;
     });
 
     res.json({ dishList: updatedDishList });
