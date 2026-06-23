@@ -2,6 +2,7 @@ import { Router } from "express";
 import prisma from "../lib/prisma";
 import { authToken, AuthRequest } from "../middleware/auth";
 import {
+  areUsersBlocked,
   getBlockContext,
   getBlockedPeerIds,
 } from "../lib/blocks";
@@ -9,6 +10,11 @@ import {
   handleModerationError,
   moderateTextFields,
 } from "../lib/moderation";
+import {
+  accessibleRecipeWhere,
+  writableDishListWhere,
+} from "../lib/recipeAccess";
+import { copyRecipeImagesForFork } from "../lib/recipeImages";
 
 const router = Router();
 
@@ -594,13 +600,24 @@ router.post("/:id/recipes", authToken, async (req: AuthRequest, res) => {
       return res.status(400).json({ error: "Recipe ID is required" });
     }
 
-    // Verify dishlist exists and user has access
-    const dishList = await prisma.dishList.findFirst({
-      where: {
-        id: dishListId,
-        OR: [{ ownerId: userId }, { collaborators: { some: { userId } } }],
-      },
-    });
+    const [dishList, recipe] = await Promise.all([
+      prisma.dishList.findFirst({
+        where: writableDishListWhere(userId, dishListId),
+      }),
+      prisma.recipe.findFirst({
+        where: accessibleRecipeWhere(userId, recipeId),
+        include: {
+          creator: {
+            select: {
+              uid: true,
+              username: true,
+              firstName: true,
+              lastName: true,
+            },
+          },
+        },
+      }),
+    ]);
 
     if (!dishList) {
       return res
@@ -608,39 +625,134 @@ router.post("/:id/recipes", authToken, async (req: AuthRequest, res) => {
         .json({ error: "Access denied or DishList not found" });
     }
 
-    // Verify recipe exists
-    const recipe = await prisma.recipe.findUnique({
-      where: { id: recipeId },
-    });
-
     if (!recipe) {
       return res.status(404).json({ error: "Recipe not found" });
     }
 
-    // Check if recipe already in dishlist
-    const existing = await prisma.dishListRecipe.findUnique({
-      where: {
-        dishListId_recipeId: {
+    if (await areUsersBlocked(userId, recipe.creatorId)) {
+      return res.status(404).json({ error: "Recipe not found" });
+    }
+
+    if (recipe.creatorId === userId) {
+      await prisma.dishListRecipe.upsert({
+        where: {
+          dishListId_recipeId: {
+            dishListId,
+            recipeId,
+          },
+        },
+        create: {
           dishListId,
           recipeId,
+          addedById: userId,
+        },
+        update: {},
+      });
+
+      return res.json({
+        message: "Recipe added successfully",
+        mode: "LINKED",
+        recipe,
+      });
+    }
+
+    const existingFork = await prisma.recipe.findUnique({
+      where: {
+        creatorId_originalRecipeId: {
+          creatorId: userId,
+          originalRecipeId: recipeId,
+        },
+      },
+      include: {
+        creator: {
+          select: {
+            uid: true,
+            username: true,
+            firstName: true,
+            lastName: true,
+          },
         },
       },
     });
 
-    if (existing) {
-      return res.status(400).json({ error: "Recipe already in this DishList" });
-    }
+    const sourceImageUrls =
+      recipe.imageUrls.length > 0
+        ? recipe.imageUrls
+        : recipe.imageUrl
+          ? [recipe.imageUrl]
+          : [];
+    const copiedImageUrls = existingFork
+      ? existingFork.imageUrls
+      : await copyRecipeImagesForFork(recipe.id, userId, sourceImageUrls);
 
-    // Add recipe to dishlist
-    await prisma.dishListRecipe.create({
-      data: {
-        dishListId,
-        recipeId,
-        addedById: userId,
-      },
+    const fork = await prisma.$transaction(async (tx) => {
+      const savedRecipe = existingFork
+        ? existingFork
+        : await tx.recipe.upsert({
+            where: {
+              creatorId_originalRecipeId: {
+                creatorId: userId,
+                originalRecipeId: recipeId,
+              },
+            },
+            create: {
+              title: recipe.title,
+              description: recipe.description,
+              instructions: recipe.instructions as any,
+              ingredients: recipe.ingredients as any,
+              prepTime: recipe.prepTime,
+              cookTime: recipe.cookTime,
+              servings: recipe.servings,
+              imageUrl: copiedImageUrls[0] || null,
+              imageUrls: copiedImageUrls,
+              nutrition: recipe.nutrition as any,
+              notes: recipe.notes,
+              tags: recipe.tags,
+              creatorId: userId,
+              originalRecipeId: recipeId,
+            },
+            update: {},
+            include: {
+              creator: {
+                select: {
+                  uid: true,
+                  username: true,
+                  firstName: true,
+                  lastName: true,
+                },
+              },
+            },
+          });
+
+      // Convert any legacy direct attachment of an external recipe into the
+      // user's independent fork.
+      await tx.dishListRecipe.deleteMany({
+        where: { dishListId, recipeId },
+      });
+
+      await tx.dishListRecipe.upsert({
+        where: {
+          dishListId_recipeId: {
+            dishListId,
+            recipeId: savedRecipe.id,
+          },
+        },
+        create: {
+          dishListId,
+          recipeId: savedRecipe.id,
+          addedById: userId,
+        },
+        update: {},
+      });
+
+      return savedRecipe;
     });
 
-    res.json({ message: "Recipe added successfully" });
+    res.json({
+      message: "Recipe saved successfully",
+      mode: existingFork ? "REUSED_FORK" : "FORKED",
+      recipe: fork,
+    });
   } catch (error) {
     console.error("Add recipe to dishlist error:", error);
     res.status(500).json({ error: "Failed to add recipe" });

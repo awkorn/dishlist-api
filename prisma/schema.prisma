@@ -24,6 +24,8 @@ model User {
   collaboratedLists DishListCollaborator[]
   followedDishLists DishListFollower[]
   createdRecipes    Recipe[]               @relation("RecipeCreator")
+  sharedRecipes     RecipeShare[]          @relation("RecipeShareSender")
+  receivedRecipes   RecipeShare[]          @relation("RecipeShareRecipient")
   addedRecipes      DishListRecipe[]       @relation("UserAddedRecipes")
   pinnedDishLists   UserDishListPin[]
 
@@ -157,12 +159,32 @@ model Recipe {
 
   // Relations
   dishLists DishListRecipe[]
+  shares    RecipeShare[]
 
   // Self-reference for original recipe tracking
   originalRecipe Recipe?  @relation("RecipeCopies", fields: [originalRecipeId], references: [id])
   copies         Recipe[] @relation("RecipeCopies")
 
+  @@unique([creatorId, originalRecipeId])
   @@map("Recipe")
+}
+
+model RecipeShare {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+
+  recipeId String
+  recipe   Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+
+  sharedById String
+  sharedBy   User   @relation("RecipeShareSender", fields: [sharedById], references: [uid], onDelete: Cascade)
+
+  recipientId String
+  recipient   User   @relation("RecipeShareRecipient", fields: [recipientId], references: [uid], onDelete: Cascade)
+
+  @@unique([recipeId, recipientId])
+  @@index([recipientId])
+  @@map("RecipeShare")
 }
 
 model DishListRecipe {

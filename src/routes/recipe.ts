@@ -15,6 +15,10 @@ import {
   handleModerationError,
   moderateTextFields,
 } from "../lib/moderation";
+import {
+  accessibleRecipeWhere,
+  writableDishListWhere,
+} from "../lib/recipeAccess";
 
 const router = Router();
 const MAX_RECIPE_IMAGES = 4;
@@ -279,8 +283,8 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
 router.get("/:id", authToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.uid;
-    const recipe = await prisma.recipe.findUnique({
-      where: { id: req.params.id },
+    const recipe = await prisma.recipe.findFirst({
+      where: accessibleRecipeWhere(userId, req.params.id),
       include: {
         creator: {
           select: {
@@ -288,6 +292,20 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
             username: true,
             firstName: true,
             lastName: true,
+          },
+        },
+        originalRecipe: {
+          select: {
+            id: true,
+            title: true,
+            creator: {
+              select: {
+                uid: true,
+                username: true,
+                firstName: true,
+                lastName: true,
+              },
+            },
           },
         },
       },
@@ -307,7 +325,8 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
       where: getShareableRecipeEntryWhere(recipe.id),
     });
 
-    const isShareable = shareableDishListEntry !== null;
+    const isShareable =
+      recipe.creatorId === userId || shareableDishListEntry !== null;
 
     res.json({
       recipe: {
@@ -364,15 +383,16 @@ router.post("/:id/share", authToken, async (req: AuthRequest, res) => {
       return res.status(404).json({ error: "Recipe not found" });
     }
 
-    // Verify recipe is on at least one public DishList (shareable).
+    // Creators may explicitly share their own private recipe. Other users may
+    // only redistribute a recipe that is already public.
     const shareableDishListEntry = await prisma.dishListRecipe.findFirst({
       where: getShareableRecipeEntryWhere(recipe.id),
     });
 
-    if (!shareableDishListEntry) {
+    if (recipe.creatorId !== userId && !shareableDishListEntry) {
       return res
         .status(403)
-        .json({ error: "Only recipes on public DishLists can be shared" });
+        .json({ error: "You cannot share this private recipe" });
     }
 
     // Get sender info
@@ -409,23 +429,32 @@ router.post("/:id/share", authToken, async (req: AuthRequest, res) => {
       });
     }
 
-    // Create notifications for all recipients
-    const notifications = await prisma.notification.createMany({
-      data: allowedRecipientIds.map((recipientId: string) => ({
-        type: "RECIPE_SHARED" as const,
-        title: `${senderName} shared a recipe with you`,
-        message: recipe.title,
-        senderId: userId,
-        receiverId: recipientId,
-        data: JSON.stringify({
-          recipeId: recipe.id,
-          recipeTitle: recipe.title,
+    const [notifications] = await prisma.$transaction([
+      prisma.notification.createMany({
+        data: allowedRecipientIds.map((recipientId: string) => ({
+          type: "RECIPE_SHARED" as const,
+          title: `${senderName} shared a recipe with you`,
+          message: recipe.title,
           senderId: userId,
-          senderName,
-        }),
-      })),
-      skipDuplicates: true,
-    });
+          receiverId: recipientId,
+          data: JSON.stringify({
+            recipeId: recipe.id,
+            recipeTitle: recipe.title,
+            senderId: userId,
+            senderName,
+          }),
+        })),
+        skipDuplicates: true,
+      }),
+      prisma.recipeShare.createMany({
+        data: allowedRecipientIds.map((recipientId: string) => ({
+          recipeId: recipe.id,
+          sharedById: userId,
+          recipientId,
+        })),
+        skipDuplicates: true,
+      }),
+    ]);
 
     res.json({
       success: true,
@@ -589,13 +618,42 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
 router.get("/:id/dishlists", authToken, async (req: AuthRequest, res) => {
   try {
     const recipeId = req.params.id;
+    const userId = req.user!.uid;
+
+    const recipe = await prisma.recipe.findFirst({
+      where: accessibleRecipeWhere(userId, recipeId),
+      select: { id: true, creatorId: true },
+    });
+
+    if (!recipe) {
+      return res.status(404).json({ error: "Recipe not found" });
+    }
+
+    const relevantRecipeIds = [recipeId];
+    if (recipe.creatorId !== userId) {
+      const fork = await prisma.recipe.findUnique({
+        where: {
+          creatorId_originalRecipeId: {
+            creatorId: userId,
+            originalRecipeId: recipeId,
+          },
+        },
+        select: { id: true },
+      });
+      if (fork) relevantRecipeIds.push(fork.id);
+    }
 
     const dishListRecipes = await prisma.dishListRecipe.findMany({
-      where: { recipeId },
+      where: {
+        recipeId: { in: relevantRecipeIds },
+        dishList: writableDishListWhere(userId),
+      },
       select: { dishListId: true },
     });
 
-    const dishListIds = dishListRecipes.map((dr) => dr.dishListId);
+    const dishListIds = Array.from(
+      new Set(dishListRecipes.map((dr) => dr.dishListId))
+    );
     res.json({ dishListIds });
   } catch (error) {
     console.error("Get recipe dishlists error:", error);
