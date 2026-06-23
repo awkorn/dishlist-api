@@ -548,32 +548,9 @@ router.delete("/:id", authToken, async (req: AuthRequest, res) => {
         .json({ error: "Cannot delete your default DishList" });
     }
 
-    // Get all recipes that are ONLY in this DishList
-    const dishListRecipes = await prisma.dishListRecipe.findMany({
-      where: { dishListId },
-      include: {
-        recipe: {
-          include: {
-            dishLists: true,
-          },
-        },
-      },
-    });
-
-    // Delete recipes that are only in this DishList
-    const recipesToDelete = dishListRecipes
-      .filter((dr) => dr.recipe.dishLists.length === 1)
-      .map((dr) => dr.recipe.id);
-
-    if (recipesToDelete.length > 0) {
-      await prisma.recipe.deleteMany({
-        where: {
-          id: { in: recipesToDelete },
-        },
-      });
-    }
-
-    // Delete the DishList (cascade will handle DishListRecipe, collaborators, followers)
+    // Delete only the DishList. Cascading relations remove list membership,
+    // collaborators, followers, invites, and pins while preserving every
+    // Recipe record, including recipes created by collaborators.
     await prisma.dishList.delete({
       where: { id: dishListId },
     });
