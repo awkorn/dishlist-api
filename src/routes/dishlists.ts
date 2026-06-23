@@ -475,11 +475,15 @@ router.post("/:id/pin", authToken, async (req: AuthRequest, res) => {
     const dishListId = req.params.id;
     const userId = req.user!.uid;
 
-    // Check if user owns or collaborates on this dishlist
+    // Pinning is available for dishlists in the user's library.
     const dishList = await prisma.dishList.findFirst({
       where: {
         id: dishListId,
-        OR: [{ ownerId: userId }, { collaborators: { some: { userId } } }],
+        OR: [
+          { ownerId: userId },
+          { collaborators: { some: { userId } } },
+          { followers: { some: { userId } } },
+        ],
       },
     });
 
@@ -517,11 +521,15 @@ router.delete("/:id/pin", authToken, async (req: AuthRequest, res) => {
     const dishListId = req.params.id;
     const userId = req.user!.uid;
 
-    // Verify user has access to this dishlist
+    // Verify the dishlist is still in the user's library.
     const dishList = await prisma.dishList.findFirst({
       where: {
         id: dishListId,
-        OR: [{ ownerId: userId }, { collaborators: { some: { userId } } }],
+        OR: [
+          { ownerId: userId },
+          { collaborators: { some: { userId } } },
+          { followers: { some: { userId } } },
+        ],
       },
     });
 
