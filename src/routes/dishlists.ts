@@ -15,8 +15,15 @@ import {
   writableDishListWhere,
 } from "../lib/recipeAccess";
 import { copyRecipeImagesForFork } from "../lib/recipeImages";
+import {
+  validateOptionalEnum,
+  validateRequiredText,
+} from "../lib/requestValidation";
 
 const router = Router();
+const DISHLIST_TITLE_MIN_LENGTH = 2;
+const DISHLIST_TITLE_MAX_LENGTH = 50;
+const DISHLIST_VISIBILITIES = ["PUBLIC", "PRIVATE"] as const;
 
 type DishListSummarySource = {
   id: string;
@@ -160,22 +167,39 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
 // Create new dishlist
 router.post("/", authToken, async (req: AuthRequest, res) => {
   try {
-    const { title, visibility = "PUBLIC" } = req.body;
+    const { title, visibility } = req.body;
     const userId = req.user!.uid;
 
-    if (!title?.trim()) {
-      return res.status(400).json({ error: "Title is required" });
+    const validatedTitle = validateRequiredText(title, {
+      field: "Title",
+      minLength: DISHLIST_TITLE_MIN_LENGTH,
+      maxLength: DISHLIST_TITLE_MAX_LENGTH,
+    });
+    if ("error" in validatedTitle) {
+      return res.status(400).json({ error: validatedTitle.error });
     }
 
-    await moderateTextFields([{ label: "DishList title", value: title }], {
-      targetType: "DISHLIST",
-      userId,
+    const validatedVisibility = validateOptionalEnum(visibility, {
+      field: "Visibility",
+      allowedValues: DISHLIST_VISIBILITIES,
+      defaultValue: "PUBLIC",
     });
+    if ("error" in validatedVisibility) {
+      return res.status(400).json({ error: validatedVisibility.error });
+    }
+
+    await moderateTextFields(
+      [{ label: "DishList title", value: validatedTitle.value }],
+      {
+        targetType: "DISHLIST",
+        userId,
+      },
+    );
 
     const dishList = await prisma.dishList.create({
       data: {
-        title: title.trim(),
-        visibility,
+        title: validatedTitle.value,
+        visibility: validatedVisibility.value,
         ownerId: userId,
         isDefault: false,
       },
@@ -222,8 +246,13 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
     const userId = req.user!.uid;
     const { title, visibility } = req.body;
 
-    if (!title?.trim()) {
-      return res.status(400).json({ error: "Title is required" });
+    const validatedTitle = validateRequiredText(title, {
+      field: "Title",
+      minLength: DISHLIST_TITLE_MIN_LENGTH,
+      maxLength: DISHLIST_TITLE_MAX_LENGTH,
+    });
+    if ("error" in validatedTitle) {
+      return res.status(400).json({ error: validatedTitle.error });
     }
 
     // Find existing dishlist
@@ -243,25 +272,40 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
     }
 
     // Prevent editing default DishList title
-    if (existingDishList.isDefault && title.trim() !== existingDishList.title) {
+    if (
+      existingDishList.isDefault &&
+      validatedTitle.value !== existingDishList.title
+    ) {
       return res
         .status(400)
         .json({ error: "Cannot change default DishList title" });
     }
 
-    await moderateTextFields([{ label: "DishList title", value: title }], {
-      targetType: "DISHLIST",
-      targetId: dishListId,
-      userId,
+    const validatedVisibility = validateOptionalEnum(visibility, {
+      field: "Visibility",
+      allowedValues: DISHLIST_VISIBILITIES,
+      defaultValue: existingDishList.visibility,
     });
+    if ("error" in validatedVisibility) {
+      return res.status(400).json({ error: validatedVisibility.error });
+    }
 
-    const nextVisibility = visibility || existingDishList.visibility;
+    await moderateTextFields(
+      [{ label: "DishList title", value: validatedTitle.value }],
+      {
+        targetType: "DISHLIST",
+        targetId: dishListId,
+        userId,
+      },
+    );
+
+    const nextVisibility = validatedVisibility.value;
 
     const updatedDishList = await prisma.$transaction(async (tx) => {
       const updated = await tx.dishList.update({
         where: { id: dishListId },
         data: {
-          title: title.trim(),
+          title: validatedTitle.value,
           visibility: nextVisibility,
         },
         include: {

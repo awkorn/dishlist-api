@@ -19,9 +19,15 @@ import {
   accessibleRecipeWhere,
   writableDishListWhere,
 } from "../lib/recipeAccess";
+import {
+  validateOptionalText,
+  validateRequiredText,
+} from "../lib/requestValidation";
 
 const router = Router();
 const MAX_RECIPE_IMAGES = 4;
+const MAX_RECIPE_TITLE_LENGTH = 100;
+const MAX_RECIPE_DESCRIPTION_LENGTH = 1000;
 
 function isAllowedRecipeImageUrl(url: string) {
   return url.startsWith(
@@ -156,8 +162,20 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
     const userId = req.user!.uid;
 
     // Validation
-    if (!title?.trim()) {
-      return res.status(400).json({ error: "Title is required" });
+    const validatedTitle = validateRequiredText(title, {
+      field: "Title",
+      maxLength: MAX_RECIPE_TITLE_LENGTH,
+    });
+    if ("error" in validatedTitle) {
+      return res.status(400).json({ error: validatedTitle.error });
+    }
+
+    const validatedDescription = validateOptionalText(description, {
+      field: "Description",
+      maxLength: MAX_RECIPE_DESCRIPTION_LENGTH,
+    });
+    if ("error" in validatedDescription) {
+      return res.status(400).json({ error: validatedDescription.error });
     }
 
     // Validate ingredients (new structured format)
@@ -220,8 +238,8 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
 
     await moderateTextFields(
       recipeModerationFields({
-        title,
-        description,
+        title: validatedTitle.value,
+        description: validatedDescription.value,
         ingredients: cleanedIngredients,
         instructions: cleanedInstructions,
         notes: normalizedNotes.notes,
@@ -233,8 +251,8 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
     // Create recipe
     const recipe = await prisma.recipe.create({
       data: {
-        title: title.trim(),
-        description: description?.trim() || null,
+        title: validatedTitle.value,
+        description: validatedDescription.value,
         instructions: cleanedInstructions as any,
         ingredients: cleanedIngredients as any,
         prepTime: prepTime || null,
@@ -504,8 +522,20 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
     }
 
     // Validation
-    if (!title?.trim()) {
-      return res.status(400).json({ error: "Title is required" });
+    const validatedTitle = validateRequiredText(title, {
+      field: "Title",
+      maxLength: MAX_RECIPE_TITLE_LENGTH,
+    });
+    if ("error" in validatedTitle) {
+      return res.status(400).json({ error: validatedTitle.error });
+    }
+
+    const validatedDescription = validateOptionalText(description, {
+      field: "Description",
+      maxLength: MAX_RECIPE_DESCRIPTION_LENGTH,
+    });
+    if ("error" in validatedDescription) {
+      return res.status(400).json({ error: validatedDescription.error });
     }
 
     // Validate ingredients (new structured format)
@@ -558,8 +588,8 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
 
     await moderateTextFields(
       recipeModerationFields({
-        title,
-        description,
+        title: validatedTitle.value,
+        description: validatedDescription.value,
         ingredients: cleanedIngredients,
         instructions: cleanedInstructions,
         notes: normalizedNotes.notes,
@@ -580,8 +610,8 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
     const updatedRecipe = await prisma.recipe.update({
       where: { id: recipeId },
       data: {
-        title: title.trim(),
-        description: description?.trim() || null,
+        title: validatedTitle.value,
+        description: validatedDescription.value,
         instructions: cleanedInstructions as any,
         ingredients: cleanedIngredients as any,
         prepTime: prepTime || null,
