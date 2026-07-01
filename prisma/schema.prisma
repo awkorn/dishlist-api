@@ -3,21 +3,24 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
   directUrl = env("DIRECT_URL")
 }
 
 model User {
-  uid       String  @id
-  email     String  @unique
-  username  String? @unique
-  firstName String?
-  lastName  String?
-  bio       String?
-  avatarUrl String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  uid         String        @id
+  email       String        @unique
+  username    String?       @unique
+  firstName   String?
+  lastName    String?
+  bio         String?
+  avatarUrl   String?
+  role        UserRole      @default(USER)
+  status      AccountStatus @default(ACTIVE)
+  suspendedAt DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
 
   // Relations
   ownedDishLists    DishList[]             @relation("DishListOwner")
@@ -49,9 +52,14 @@ model User {
   pushTokens PushToken[]
 
   // Moderation
-  submittedReports ContentReport[] @relation("ReportsSubmitted")
-  receivedReports  ContentReport[] @relation("ReportsReceived")
+  submittedReports  ContentReport[]    @relation("ReportsSubmitted")
+  receivedReports   ContentReport[]    @relation("ReportsReceived")
+  assignedReports   ContentReport[]    @relation("ReportsAssigned")
+  resolvedReports   ContentReport[]    @relation("ReportsResolved")
+  moderationActions ModerationAction[] @relation("ModerationActionsPerformed")
 
+  @@index([status])
+  @@index([role])
   @@map("User")
 }
 
@@ -69,15 +77,19 @@ model AccountDeletion {
 }
 
 model ContentReport {
-  id         String               @id @default(cuid())
-  targetType ModerationTargetType
-  targetId   String
-  reason     ContentReportReason
-  details    String?
-  status     ContentReportStatus  @default(PENDING)
-  createdAt  DateTime             @default(now())
-  updatedAt  DateTime             @updatedAt
-  resolvedAt DateTime?
+  id             String               @id @default(cuid())
+  targetType     ModerationTargetType
+  targetId       String
+  reason         ContentReportReason
+  details        String?
+  status         ContentReportStatus  @default(PENDING)
+  dedupeKey      String?              @unique
+  targetSnapshot Json?
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+  reviewedAt     DateTime?
+  resolvedAt     DateTime?
+  resolutionNote String?
 
   reporterId String
   reporter   User   @relation("ReportsSubmitted", fields: [reporterId], references: [uid], onDelete: Cascade)
@@ -85,11 +97,41 @@ model ContentReport {
   ownerId String?
   owner   User?   @relation("ReportsReceived", fields: [ownerId], references: [uid], onDelete: SetNull)
 
+  assignedToId String?
+  assignedTo   User?   @relation("ReportsAssigned", fields: [assignedToId], references: [uid], onDelete: SetNull)
+
+  resolvedById String?
+  resolvedBy   User?   @relation("ReportsResolved", fields: [resolvedById], references: [uid], onDelete: SetNull)
+
+  actions ModerationAction[]
+
   @@index([targetType, targetId])
   @@index([status, createdAt])
   @@index([reporterId])
   @@index([ownerId])
+  @@index([assignedToId])
   @@map("ContentReport")
+}
+
+model ModerationAction {
+  id         String               @id @default(cuid())
+  targetType ModerationTargetType
+  targetId   String
+  action     ModerationActionType
+  note       String
+  metadata   Json?
+  createdAt  DateTime             @default(now())
+
+  reportId String?
+  report   ContentReport? @relation(fields: [reportId], references: [id], onDelete: SetNull)
+
+  moderatorId String?
+  moderator   User?   @relation("ModerationActionsPerformed", fields: [moderatorId], references: [uid], onDelete: SetNull)
+
+  @@index([targetType, targetId, createdAt])
+  @@index([reportId])
+  @@index([moderatorId, createdAt])
+  @@map("ModerationAction")
 }
 
 model ModerationReview {
@@ -113,12 +155,13 @@ model ModerationReview {
 }
 
 model DishList {
-  id          String             @id @default(cuid())
-  title       String
-  visibility  DishListVisibility @default(PUBLIC)
-  isDefault   Boolean            @default(false)
-  createdAt   DateTime           @default(now())
-  updatedAt   DateTime           @updatedAt
+  id              String                 @id @default(cuid())
+  title           String
+  visibility      DishListVisibility     @default(PUBLIC)
+  isDefault       Boolean                @default(false)
+  moderationState ContentModerationState @default(VISIBLE)
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
 
   // Owner relation
   ownerId String
@@ -131,26 +174,28 @@ model DishList {
   invites       DishListInvite[]
   pins          UserDishListPin[]
 
+  @@index([moderationState])
   @@map("DishList")
 }
 
 model Recipe {
-  id               String   @id @default(cuid())
+  id               String                 @id @default(cuid())
   title            String
   description      String?
-  instructions     Json     // Changed from String[] - now stores RecipeItem[]
-  ingredients      Json     // Changed from String[] - now stores RecipeItem[]
-  prepTime         Int?     // minutes
-  cookTime         Int?     // minutes
+  instructions     Json // Changed from String[] - now stores RecipeItem[]
+  ingredients      Json // Changed from String[] - now stores RecipeItem[]
+  prepTime         Int? // minutes
+  cookTime         Int? // minutes
   servings         Int?
   imageUrl         String?
-  imageUrls        String[] @default([])
+  imageUrls        String[]               @default([])
   nutrition        Json?
-  notes            String[] @default([])
-  tags             String[] @default([])
-  originalRecipeId String?  // For tracking copied recipes
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  notes            String[]               @default([])
+  tags             String[]               @default([])
+  originalRecipeId String? // For tracking copied recipes
+  moderationState  ContentModerationState @default(VISIBLE)
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
 
   // Creator relation
   creatorId String
@@ -165,6 +210,7 @@ model Recipe {
   copies         Recipe[] @relation("RecipeCopies")
 
   @@unique([creatorId, originalRecipeId])
+  @@index([moderationState])
   @@map("Recipe")
 }
 
@@ -236,8 +282,8 @@ model DishListFollower {
 }
 
 model UserDishListPin {
-  id        String   @id @default(cuid())
-  pinnedAt  DateTime @default(now())
+  id       String   @id @default(cuid())
+  pinnedAt DateTime @default(now())
 
   // Relations
   dishListId String
@@ -253,8 +299,8 @@ model UserDishListPin {
 model DishListInvite {
   id        String    @id @default(cuid())
   token     String    @unique @default(cuid()) // Secure token for invite URLs
-  expiresAt DateTime                           // 7 days from creation
-  usedAt    DateTime?                          // Timestamp when accepted (null if pending)
+  expiresAt DateTime // 7 days from creation
+  usedAt    DateTime? // Timestamp when accepted (null if pending)
   createdAt DateTime  @default(now())
 
   // Relations
@@ -267,7 +313,7 @@ model DishListInvite {
   // For link invites: inviteeId is null (anyone with link can use)
   // For direct invites: inviteeId is set (only that user can use)
   inviteeId String?
-  invitee   User?  @relation("InviteReceiver", fields: [inviteeId], references: [uid], onDelete: Cascade)
+  invitee   User?   @relation("InviteReceiver", fields: [inviteeId], references: [uid], onDelete: Cascade)
 
   @@index([token])
   @@index([dishListId])
@@ -278,9 +324,9 @@ model DishListInvite {
 
 model UserFollow {
   id         String       @id @default(cuid())
-  status     FollowStatus @default(PENDING)  
+  status     FollowStatus @default(PENDING)
   followedAt DateTime     @default(now())
-  acceptedAt DateTime?                       
+  acceptedAt DateTime?
 
   // Relations
   followerId String
@@ -290,7 +336,7 @@ model UserFollow {
   following   User   @relation("UserFollowers", fields: [followingId], references: [uid], onDelete: Cascade)
 
   @@unique([followerId, followingId])
-  @@index([followingId, status]) 
+  @@index([followingId, status])
   @@map("UserFollow")
 }
 
@@ -331,7 +377,7 @@ model Notification {
 
 model PushToken {
   id        String   @id @default(cuid())
-  token     String   // Expo push token (ExponentPushToken[...])
+  token     String // Expo push token (ExponentPushToken[...])
   createdAt DateTime @default(now())
 
   userId String
@@ -355,10 +401,27 @@ enum NotificationType {
   DISHLIST_FOLLOWED
   COLLABORATION_ACCEPTED
   COLLABORATION_DECLINED
-  USER_FOLLOWED       
-  FOLLOW_REQUEST         
-  FOLLOW_ACCEPTED        
+  USER_FOLLOWED
+  FOLLOW_REQUEST
+  FOLLOW_ACCEPTED
   SYSTEM_UPDATE
+  REPORT_RESOLVED
+}
+
+enum UserRole {
+  USER
+  MODERATOR
+  ADMIN
+}
+
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum ContentModerationState {
+  VISIBLE
+  HIDDEN
 }
 
 enum FollowStatus {
@@ -396,4 +459,13 @@ enum ContentReportStatus {
   REVIEWED
   ACTIONED
   DISMISSED
+}
+
+enum ModerationActionType {
+  CLAIM
+  DISMISS_REPORT
+  HIDE_CONTENT
+  SUSPEND_USER
+  RESTORE_CONTENT
+  RESTORE_USER
 }

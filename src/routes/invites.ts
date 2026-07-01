@@ -260,6 +260,8 @@ router.post("/:token/validate", optionalAuthToken, async (req: AuthRequest, res)
             title: true,
             visibility: true,
             ownerId: true,
+            moderationState: true,
+            owner: { select: { status: true } },
           },
         },
         inviter: {
@@ -269,6 +271,7 @@ router.post("/:token/validate", optionalAuthToken, async (req: AuthRequest, res)
             firstName: true,
             lastName: true,
             avatarUrl: true,
+            status: true,
           },
         },
       },
@@ -276,6 +279,16 @@ router.post("/:token/validate", optionalAuthToken, async (req: AuthRequest, res)
 
     if (!invite) {
       return res.status(404).json({ error: "Invite not found", code: "NOT_FOUND" });
+    }
+    if (
+      invite.inviter.status !== "ACTIVE" ||
+      invite.dishList.owner.status !== "ACTIVE" ||
+      invite.dishList.moderationState !== "VISIBLE"
+    ) {
+      return res.status(410).json({
+        error: "This invite is no longer available",
+        code: "UNAVAILABLE",
+      });
     }
 
     // Check if expired
@@ -359,15 +372,32 @@ router.post("/:token/accept", authToken, async (req: AuthRequest, res) => {
     const invite = await prisma.dishListInvite.findUnique({
       where: { token },
       include: {
-        dishList: true,
+        dishList: {
+          include: { owner: { select: { status: true } } },
+        },
         inviter: {
-          select: { uid: true, username: true, firstName: true },
+          select: {
+            uid: true,
+            username: true,
+            firstName: true,
+            status: true,
+          },
         },
       },
     });
 
     if (!invite) {
       return res.status(404).json({ error: "Invite not found", code: "NOT_FOUND" });
+    }
+    if (
+      invite.inviter.status !== "ACTIVE" ||
+      invite.dishList.owner.status !== "ACTIVE" ||
+      invite.dishList.moderationState !== "VISIBLE"
+    ) {
+      return res.status(410).json({
+        error: "This invite is no longer available",
+        code: "UNAVAILABLE",
+      });
     }
 
     // Validations

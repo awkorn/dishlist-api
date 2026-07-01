@@ -247,8 +247,12 @@ router.get("/me", authToken, async (req: AuthRequest, res) => {
       include: {
         _count: {
           select: {
-            followers: { where: { status: "ACCEPTED" } },
-            following: { where: { status: "ACCEPTED" } },
+            followers: {
+              where: { status: "ACCEPTED", follower: { status: "ACTIVE" } },
+            },
+            following: {
+              where: { status: "ACCEPTED", following: { status: "ACTIVE" } },
+            },
           },
         },
       },
@@ -286,8 +290,12 @@ router.patch("/me", authToken, async (req: AuthRequest, res) => {
       include: {
         _count: {
           select: {
-            followers: { where: { status: "ACCEPTED" } },
-            following: { where: { status: "ACCEPTED" } },
+            followers: {
+              where: { status: "ACCEPTED", follower: { status: "ACTIVE" } },
+            },
+            following: {
+              where: { status: "ACCEPTED", following: { status: "ACTIVE" } },
+            },
           },
         },
       },
@@ -375,8 +383,12 @@ router.put("/me", authToken, async (req: AuthRequest, res) => {
       include: {
         _count: {
           select: {
-            followers: { where: { status: "ACCEPTED" } },
-            following: { where: { status: "ACCEPTED" } },
+            followers: {
+              where: { status: "ACCEPTED", follower: { status: "ACTIVE" } },
+            },
+            following: {
+              where: { status: "ACCEPTED", following: { status: "ACTIVE" } },
+            },
           },
         },
       },
@@ -471,6 +483,7 @@ router.get("/mutuals", authToken, async (req: AuthRequest, res) => {
             followers: {
               some: {
                 followerId: userId,
+                status: "ACCEPTED",
               },
             },
           },
@@ -479,6 +492,7 @@ router.get("/mutuals", authToken, async (req: AuthRequest, res) => {
             following: {
               some: {
                 followingId: userId,
+                status: "ACCEPTED",
               },
             },
           },
@@ -645,8 +659,12 @@ router.get("/:userId", authToken, async (req: AuthRequest, res) => {
         include: {
           _count: {
             select: {
-              followers: { where: { status: "ACCEPTED" } },
-              following: { where: { status: "ACCEPTED" } },
+              followers: {
+                where: { status: "ACCEPTED", follower: { status: "ACTIVE" } },
+              },
+              following: {
+                where: { status: "ACCEPTED", following: { status: "ACTIVE" } },
+              },
             },
           },
         },
@@ -787,7 +805,7 @@ router.get("/:userId", authToken, async (req: AuthRequest, res) => {
     res.json({
       user: {
         uid: user.uid,
-        email: user.email,
+        ...(userId === currentUserId ? { email: user.email } : {}),
         username: user.username,
         firstName: user.firstName,
         lastName: user.lastName,
@@ -1010,10 +1028,16 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
           _count: {
             select: {
               followers: {
-                where: { status: "ACCEPTED" }, // Only count accepted followers
+                where: {
+                  status: "ACCEPTED",
+                  follower: { status: "ACTIVE" },
+                },
               },
               following: {
-                where: { status: "ACCEPTED" }, // Only count accepted following
+                where: {
+                  status: "ACCEPTED",
+                  following: { status: "ACTIVE" },
+                },
               },
             },
           },
@@ -1060,7 +1084,7 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
 
     res.json({
       uid: user.uid,
-      email: user.email,
+      ...(isOwnProfile ? { email: user.email } : {}),
       username: user.username,
       firstName: user.firstName,
       lastName: user.lastName,
@@ -1108,6 +1132,7 @@ router.get("/:userId/followers", authToken, async (req: AuthRequest, res) => {
         followingId: userId,
         status: "ACCEPTED",
         followerId: { notIn: blockContext.blockedPeerIds },
+        follower: { status: "ACTIVE" },
       },
       include: {
         follower: {
@@ -1188,6 +1213,7 @@ router.get("/:userId/following", authToken, async (req: AuthRequest, res) => {
         followerId: userId,
         status: "ACCEPTED",
         followingId: { notIn: blockContext.blockedPeerIds },
+        following: { status: "ACTIVE" },
       },
       include: {
         following: {

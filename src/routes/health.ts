@@ -7,7 +7,7 @@ router.get("/", async (_, res) => {
   try {
     await prisma.$queryRaw`SELECT 1`;
     res.json({ status: "ok", db: "connected" });
-  } catch (e) {
+  } catch {
     res.status(500).json({ status: "error", db: "disconnected" });
   }
 });

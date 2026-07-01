@@ -17,7 +17,13 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
     const notifications = await prisma.notification.findMany({
       where: {
         receiverId: userId,
-        OR: [{ senderId: null }, { senderId: { notIn: blockedPeerIds } }],
+        OR: [
+          { senderId: null },
+          {
+            senderId: { notIn: blockedPeerIds },
+            sender: { is: { status: "ACTIVE" } },
+          },
+        ],
       },
       include: {
         sender: {
@@ -50,7 +56,13 @@ router.get("/unread-count", authToken, async (req: AuthRequest, res) => {
       where: {
         receiverId: userId,
         isRead: false,
-        OR: [{ senderId: null }, { senderId: { notIn: blockedPeerIds } }],
+        OR: [
+          { senderId: null },
+          {
+            senderId: { notIn: blockedPeerIds },
+            sender: { is: { status: "ACTIVE" } },
+          },
+        ],
       },
     });
 
@@ -465,7 +477,13 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
     const notifications = await prisma.notification.findMany({
       where: {
         receiverId: userId,
-        OR: [{ senderId: null }, { senderId: { notIn: blockedPeerIds } }],
+        OR: [
+          { senderId: null },
+          {
+            senderId: { notIn: blockedPeerIds },
+            sender: { is: { status: "ACTIVE" } },
+          },
+        ],
       },
       include: {
         sender: {

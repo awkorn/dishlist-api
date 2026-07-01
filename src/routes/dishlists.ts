@@ -400,6 +400,12 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
             select: { userId: true },
           },
           recipes: {
+            where: {
+              recipe: {
+                moderationState: "VISIBLE",
+                creator: { status: "ACTIVE" },
+              },
+            },
             include: {
               recipe: {
                 include: {

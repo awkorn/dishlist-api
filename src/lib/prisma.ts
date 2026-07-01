@@ -1,9 +1,15 @@
 import { PrismaClient } from "@prisma/client";
 import { sendPushToUser } from "./pushNotifications";
+import {
+  activeUserWhere,
+  visibleDishListWhere,
+  visibleRecipeWhere,
+} from "./visibility";
 
 const basePrisma = new PrismaClient();
 
-const prisma = basePrisma.$extends({
+export const adminPrisma = basePrisma.$extends({
+  name: "notification-push",
   query: {
     notification: {
       async create({ args, query }) {
@@ -26,6 +32,72 @@ const prisma = basePrisma.$extends({
         }).catch((err) => console.error("Push notification failed:", err));
 
         return result;
+      },
+    },
+  },
+});
+
+function appendVisibilityFilter<T>(
+  where: T | undefined,
+  visibility: Record<string, unknown>
+) {
+  return {
+    AND: [where || {}, visibility],
+  };
+}
+
+const prisma = adminPrisma.$extends({
+  name: "consumer-visibility",
+  query: {
+    user: {
+      async findMany({ args, query }) {
+        args.where = appendVisibilityFilter(args.where, activeUserWhere);
+        return query(args);
+      },
+      async findFirst({ args, query }) {
+        args.where = appendVisibilityFilter(args.where, activeUserWhere);
+        return query(args);
+      },
+      async findUnique({ args, query }) {
+        args.where = {
+          ...args.where,
+          ...activeUserWhere,
+        } as typeof args.where;
+        return query(args);
+      },
+    },
+    dishList: {
+      async findMany({ args, query }) {
+        args.where = appendVisibilityFilter(args.where, visibleDishListWhere);
+        return query(args);
+      },
+      async findFirst({ args, query }) {
+        args.where = appendVisibilityFilter(args.where, visibleDishListWhere);
+        return query(args);
+      },
+      async findUnique({ args, query }) {
+        args.where = {
+          ...args.where,
+          ...visibleDishListWhere,
+        } as typeof args.where;
+        return query(args);
+      },
+    },
+    recipe: {
+      async findMany({ args, query }) {
+        args.where = appendVisibilityFilter(args.where, visibleRecipeWhere);
+        return query(args);
+      },
+      async findFirst({ args, query }) {
+        args.where = appendVisibilityFilter(args.where, visibleRecipeWhere);
+        return query(args);
+      },
+      async findUnique({ args, query }) {
+        args.where = {
+          ...args.where,
+          ...visibleRecipeWhere,
+        } as typeof args.where;
+        return query(args);
       },
     },
   },

@@ -6,8 +6,8 @@ A Node.js/Express API for the DishList recipe sharing platform
 ## Tech Stack
 - Node.js + Express + TypeScript
 - PostgreSQL + Prisma ORM
-- Firebase Auth
-- Firebase Storage
+- Supabase Auth
+- Supabase Storage
 
 
 ## Quick Start
@@ -22,6 +22,19 @@ A Node.js/Express API for the DishList recipe sharing platform
     ```bash
     npm run dev
 API runs on http://localhost:3000
+
+## Moderation operations
+
+Apply the moderation workflow migration before deploying the admin dashboard.
+Grant the first administrator with:
+
+```bash
+npm run admin:role -- owner@example.com ADMIN
+```
+
+The admin API is mounted at `/admin` and requires a valid Supabase session plus
+a `MODERATOR` or `ADMIN` database role. See `../MODERATION_RUNBOOK.md` for the
+review and incident process.
 
 ### Available Scripts 
 - npm run dev - Start with hot reload

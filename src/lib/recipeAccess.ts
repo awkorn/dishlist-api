@@ -12,6 +12,8 @@ export function accessibleRecipeWhere(
         dishLists: {
           some: {
             dishList: {
+              moderationState: "VISIBLE",
+              owner: { status: "ACTIVE" },
               visibility: "PUBLIC",
             },
           },
@@ -21,6 +23,8 @@ export function accessibleRecipeWhere(
         dishLists: {
           some: {
             dishList: {
+              moderationState: "VISIBLE",
+              owner: { status: "ACTIVE" },
               OR: [
                 { ownerId: userId },
                 { collaborators: { some: { userId } } },

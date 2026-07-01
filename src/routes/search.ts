@@ -538,8 +538,6 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
     });
     const savedRecipeIds = new Set(userDishListRecipes.map((r) => r.recipeId));
 
-    const isAllTab = tab === "all";
-
     // Build response based on tab
     if (tab === "all") {
       // ALL tab: fetch limited results from each category

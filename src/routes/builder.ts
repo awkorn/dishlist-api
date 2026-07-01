@@ -3,12 +3,6 @@ import { authToken, AuthRequest } from "../middleware/auth";
 
 const router = Router();
 
-// ─── Types ──────────────────────────────────────────────────────────
-interface ChatMessage {
-  role: "user" | "assistant";
-  content: string;
-}
-
 interface GeneratedRecipe {
   title: string;
   prepTime: number | null;
