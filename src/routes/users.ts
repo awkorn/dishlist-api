@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { Router } from "express";
 import prisma from "../lib/prisma";
 import { supabaseAdmin } from "../lib/supabase";
@@ -125,6 +126,21 @@ function isAuthUserNotFound(error: { message?: string; status?: number }) {
   );
 }
 
+function isUniqueConstraintErrorForField(error: unknown, field: string) {
+  if (
+    !(error instanceof Prisma.PrismaClientKnownRequestError) ||
+    error.code !== "P2002"
+  ) {
+    return false;
+  }
+
+  const target = error.meta?.target;
+  return (
+    (Array.isArray(target) && target.includes(field)) ||
+    (typeof target === "string" && target.includes(field))
+  );
+}
+
 async function deleteSupabaseAuthUser(userId: string) {
   const { error } = await supabaseAdmin.auth.admin.deleteUser(userId);
 
@@ -233,6 +249,13 @@ router.post("/register", authToken, async (req: AuthRequest, res) => {
     }
 
     if (handleModerationError(error, res)) return;
+
+    if (isUniqueConstraintErrorForField(error, "username")) {
+      return res.status(409).json({
+        error: "Username already taken",
+        code: "USERNAME_TAKEN",
+      });
+    }
 
     console.error("Registration error:", error);
     res.status(400).json({ error: "Failed to create/update user" });
@@ -397,6 +420,13 @@ router.put("/me", authToken, async (req: AuthRequest, res) => {
     res.json({ user: updatedUser });
   } catch (error) {
     if (handleModerationError(error, res)) return;
+
+    if (isUniqueConstraintErrorForField(error, "username")) {
+      return res.status(409).json({
+        error: "Username already taken",
+        code: "USERNAME_TAKEN",
+      });
+    }
 
     console.error("Update user profile error:", error);
     res.status(500).json({ error: "Failed to update profile" });
