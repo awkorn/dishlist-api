@@ -16,6 +16,7 @@ import {
   ProfileValidationError,
   validateProfileInput,
 } from "../lib/profileValidation";
+import { parsePageLimit } from "../lib/pagination";
 
 const router = Router();
 const USER_STORAGE_BUCKETS = ["avatars", "recipes"] as const;
@@ -1154,6 +1155,11 @@ router.get("/:userId/followers", authToken, async (req: AuthRequest, res) => {
   try {
     const { userId } = req.params;
     const currentUserId = req.user!.uid;
+    const limit = parsePageLimit(req.query.limit);
+    const cursor =
+      typeof req.query.cursor === "string" && req.query.cursor
+        ? req.query.cursor
+        : undefined;
 
     const [targetUser, blockContext] = await Promise.all([
       prisma.user.findUnique({
@@ -1167,11 +1173,10 @@ router.get("/:userId/followers", authToken, async (req: AuthRequest, res) => {
     }
 
     if (blockContext.isBlocked(userId)) {
-      return res.json({ users: [] });
+      return res.json({ users: [], nextCursor: null });
     }
 
-    // Get all accepted followers of this user
-    const followers = await prisma.userFollow.findMany({
+    const followerPage = await prisma.userFollow.findMany({
       where: {
         followingId: userId,
         status: "ACCEPTED",
@@ -1189,8 +1194,12 @@ router.get("/:userId/followers", authToken, async (req: AuthRequest, res) => {
           },
         },
       },
-      orderBy: { acceptedAt: "desc" },
+      orderBy: [{ acceptedAt: "desc" }, { id: "desc" }],
+      take: limit + 1,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     });
+    const hasMore = followerPage.length > limit;
+    const followers = hasMore ? followerPage.slice(0, limit) : followerPage;
 
     // For each follower, check if current user follows them back
     const followerIds = followers.map((f) => f.followerId);
@@ -1223,7 +1232,10 @@ router.get("/:userId/followers", authToken, async (req: AuthRequest, res) => {
       followStatus: followStatusMap.get(f.followerId) || "NONE",
     }));
 
-    res.json({ users: result });
+    res.json({
+      users: result,
+      nextCursor: hasMore ? followers[followers.length - 1]?.id ?? null : null,
+    });
   } catch (error) {
     console.error("Get followers error:", error);
     res.status(500).json({ error: "Failed to fetch followers" });
@@ -1235,6 +1247,11 @@ router.get("/:userId/following", authToken, async (req: AuthRequest, res) => {
   try {
     const { userId } = req.params;
     const currentUserId = req.user!.uid;
+    const limit = parsePageLimit(req.query.limit);
+    const cursor =
+      typeof req.query.cursor === "string" && req.query.cursor
+        ? req.query.cursor
+        : undefined;
 
     const [targetUser, blockContext] = await Promise.all([
       prisma.user.findUnique({
@@ -1248,11 +1265,10 @@ router.get("/:userId/following", authToken, async (req: AuthRequest, res) => {
     }
 
     if (blockContext.isBlocked(userId)) {
-      return res.json({ users: [] });
+      return res.json({ users: [], nextCursor: null });
     }
 
-    // Get all users this person follows (accepted only)
-    const following = await prisma.userFollow.findMany({
+    const followingPage = await prisma.userFollow.findMany({
       where: {
         followerId: userId,
         status: "ACCEPTED",
@@ -1270,8 +1286,12 @@ router.get("/:userId/following", authToken, async (req: AuthRequest, res) => {
           },
         },
       },
-      orderBy: { acceptedAt: "desc" },
+      orderBy: [{ acceptedAt: "desc" }, { id: "desc" }],
+      take: limit + 1,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     });
+    const hasMore = followingPage.length > limit;
+    const following = hasMore ? followingPage.slice(0, limit) : followingPage;
 
     // Transform data
     const result = following.map((f) => ({
@@ -1282,7 +1302,10 @@ router.get("/:userId/following", authToken, async (req: AuthRequest, res) => {
       avatarUrl: f.following.avatarUrl,
     }));
 
-    res.json({ users: result });
+    res.json({
+      users: result,
+      nextCursor: hasMore ? following[following.length - 1]?.id ?? null : null,
+    });
   } catch (error) {
     console.error("Get following error:", error);
     res.status(500).json({ error: "Failed to fetch following" });
