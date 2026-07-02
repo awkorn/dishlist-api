@@ -12,6 +12,10 @@ import {
   handleModerationError,
   moderateTextFields,
 } from "../lib/moderation";
+import {
+  ProfileValidationError,
+  validateProfileInput,
+} from "../lib/profileValidation";
 
 const router = Router();
 const USER_STORAGE_BUCKETS = ["avatars", "recipes"] as const;
@@ -164,7 +168,6 @@ router.post("/register", authToken, async (req: AuthRequest, res) => {
   let shouldRollbackAuthUser = false;
 
   try {
-    const { username, firstName, lastName, bio } = req.body;
     const userId = req.user!.uid;
     const email = req.user?.email?.trim().toLowerCase();
     if (!email) {
@@ -175,6 +178,9 @@ router.post("/register", authToken, async (req: AuthRequest, res) => {
       select: { uid: true },
     });
     shouldRollbackAuthUser = !existingUser;
+    const { username, firstName, lastName, bio } = validateProfileInput(
+      req.body
+    );
 
     await moderateTextFields(
       [
@@ -249,6 +255,14 @@ router.post("/register", authToken, async (req: AuthRequest, res) => {
     }
 
     if (handleModerationError(error, res)) return;
+
+    if (error instanceof ProfileValidationError) {
+      return res.status(400).json({
+        error: error.message,
+        code: "PROFILE_VALIDATION_ERROR",
+        field: error.field,
+      });
+    }
 
     if (isUniqueConstraintErrorForField(error, "username")) {
       return res.status(409).json({
@@ -334,7 +348,8 @@ router.patch("/me", authToken, async (req: AuthRequest, res) => {
 // Update current user's profile
 router.put("/me", authToken, async (req: AuthRequest, res) => {
   try {
-    const { username, firstName, lastName, bio, avatarUrl } = req.body;
+    const { username, firstName, lastName, bio, avatarUrl } =
+      validateProfileInput(req.body, { allowAvatarUrl: true });
     const userId = req.user!.uid;
 
     await moderateTextFields(
@@ -346,15 +361,6 @@ router.put("/me", authToken, async (req: AuthRequest, res) => {
       ],
       { targetType: "USER", targetId: userId, userId }
     );
-
-    // Validate required fields if provided
-    if (username !== undefined && !username?.trim()) {
-      return res.status(400).json({ error: "Username cannot be empty" });
-    }
-
-    if (firstName !== undefined && !firstName?.trim()) {
-      return res.status(400).json({ error: "First name cannot be empty" });
-    }
 
     if (
       avatarUrl !== undefined &&
@@ -383,18 +389,18 @@ router.put("/me", authToken, async (req: AuthRequest, res) => {
 
     // Required fields - only update if provided and non-empty
     if (username !== undefined) {
-      updateData.username = username.trim();
+      updateData.username = username;
     }
     if (firstName !== undefined) {
-      updateData.firstName = firstName.trim();
+      updateData.firstName = firstName;
     }
 
     // Optional fields - can be set to null to clear
     if (lastName !== undefined) {
-      updateData.lastName = lastName === null ? null : lastName.trim() || null;
+      updateData.lastName = lastName;
     }
     if (bio !== undefined) {
-      updateData.bio = bio === null ? null : bio.trim() || null;
+      updateData.bio = bio;
     }
     if (avatarUrl !== undefined) {
       updateData.avatarUrl = avatarUrl === null ? null : avatarUrl;
@@ -420,6 +426,14 @@ router.put("/me", authToken, async (req: AuthRequest, res) => {
     res.json({ user: updatedUser });
   } catch (error) {
     if (handleModerationError(error, res)) return;
+
+    if (error instanceof ProfileValidationError) {
+      return res.status(400).json({
+        error: error.message,
+        code: "PROFILE_VALIDATION_ERROR",
+        field: error.field,
+      });
+    }
 
     if (isUniqueConstraintErrorForField(error, "username")) {
       return res.status(409).json({
