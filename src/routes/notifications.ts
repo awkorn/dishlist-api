@@ -37,6 +37,9 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
         },
       },
       orderBy: { createdAt: "desc" },
+      // Bound the payload; older notifications are rarely relevant and the
+      // client renders a flat recent list.
+      take: 50,
     });
 
     res.json({ notifications });
@@ -465,45 +468,6 @@ router.post("/:id/decline-follow", authToken, async (req: AuthRequest, res) => {
   } catch (error) {
     console.error("Decline follow error:", error);
     res.status(500).json({ error: "Failed to decline follow request" });
-  }
-});
-
-// UPDATE: Get notifications - include sender avatar
-router.get("/", authToken, async (req: AuthRequest, res) => {
-  try {
-    const userId = req.user!.uid;
-    const blockedPeerIds = await getBlockedPeerIds(userId);
-
-    const notifications = await prisma.notification.findMany({
-      where: {
-        receiverId: userId,
-        OR: [
-          { senderId: null },
-          {
-            senderId: { notIn: blockedPeerIds },
-            sender: { is: { status: "ACTIVE" } },
-          },
-        ],
-      },
-      include: {
-        sender: {
-          select: {
-            uid: true,
-            username: true,
-            firstName: true,
-            lastName: true,
-            avatarUrl: true, // Include avatar
-          },
-        },
-      },
-      orderBy: { createdAt: "desc" },
-      take: 100,
-    });
-
-    res.json({ notifications });
-  } catch (error) {
-    console.error("Get notifications error:", error);
-    res.status(500).json({ error: "Failed to fetch notifications" });
   }
 });
 

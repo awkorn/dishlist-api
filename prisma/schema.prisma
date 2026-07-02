@@ -175,6 +175,7 @@ model DishList {
   pins          UserDishListPin[]
 
   @@index([moderationState])
+  @@index([ownerId])
   @@map("DishList")
 }
 
@@ -263,6 +264,7 @@ model DishListCollaborator {
   user   User   @relation(fields: [userId], references: [uid], onDelete: Cascade)
 
   @@unique([dishListId, userId])
+  @@index([userId])
   @@map("DishListCollaborator")
 }
 
@@ -278,6 +280,7 @@ model DishListFollower {
   user   User   @relation(fields: [userId], references: [uid], onDelete: Cascade)
 
   @@unique([dishListId, userId])
+  @@index([userId])
   @@map("DishListFollower")
 }
 
@@ -293,6 +296,7 @@ model UserDishListPin {
   user   User   @relation(fields: [userId], references: [uid], onDelete: Cascade)
 
   @@unique([dishListId, userId])
+  @@index([userId])
   @@map("UserDishListPin")
 }
 
@@ -373,6 +377,9 @@ model Notification {
   receiverId String
   receiver   User   @relation("NotificationReceiver", fields: [receiverId], references: [uid], onDelete: Cascade)
 
+  @@index([receiverId, createdAt])
+  @@index([receiverId, isRead])
+  @@index([senderId])
   @@map("Notification")
 }
 

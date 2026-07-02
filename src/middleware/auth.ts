@@ -89,14 +89,16 @@ export const authToken = async (
     }
 
     const decoded = await verifyAuthToken(token);
-    if (await isAccountDeletionBlocked(decoded.sub, req)) {
+    const [deletionBlocked, applicationUser] = await Promise.all([
+      isAccountDeletionBlocked(decoded.sub, req),
+      adminPrisma.user.findUnique({
+        where: { uid: decoded.sub },
+        select: { role: true, status: true },
+      }),
+    ]);
+    if (deletionBlocked) {
       return res.status(410).json({ error: "Account deletion is in progress" });
     }
-
-    const applicationUser = await adminPrisma.user.findUnique({
-      where: { uid: decoded.sub },
-      select: { role: true, status: true },
-    });
     if (applicationUser?.status === "SUSPENDED") {
       return res.status(403).json({
         error: "This account has been suspended",
@@ -128,14 +130,16 @@ export const optionalAuthToken = async (
     }
 
     const decoded = await verifyAuthToken(token);
-    if (await isAccountDeletionBlocked(decoded.sub, req)) {
+    const [deletionBlocked, applicationUser] = await Promise.all([
+      isAccountDeletionBlocked(decoded.sub, req),
+      adminPrisma.user.findUnique({
+        where: { uid: decoded.sub },
+        select: { role: true, status: true },
+      }),
+    ]);
+    if (deletionBlocked) {
       return next();
     }
-
-    const applicationUser = await adminPrisma.user.findUnique({
-      where: { uid: decoded.sub },
-      select: { role: true, status: true },
-    });
     if (applicationUser?.status === "SUSPENDED") {
       return next();
     }

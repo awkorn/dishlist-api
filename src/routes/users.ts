@@ -756,59 +756,48 @@ router.get("/:userId", authToken, async (req: AuthRequest, res) => {
             OR: [{ ownerId: userId }, { collaborators: { some: { userId } } }],
           };
 
-    // Fetch full dishlist payload only when needed by the client
-    const dishlists = includeDishlists
-      ? await prisma.dishList.findMany({
-          where: dishListWhere,
-          include: {
-            owner: {
-              select: {
-                uid: true,
-                username: true,
-                firstName: true,
-                lastName: true,
-              },
-            },
-            _count: {
-              select: {
-                recipes: true,
-                followers: true,
-              },
-            },
-            collaborators: {
-              where: { userId: currentUserId },
-            },
-            followers: {
-              where: { userId: currentUserId },
-            },
-            pins: {
-              where: { userId: currentUserId },
-              select: { userId: true },
-            },
-          },
-          orderBy: { createdAt: "desc" },
-        })
-      : [];
-
-    const dishlistIds =
+    // Dishlists, recipes, and the follow relation are independent — fetch
+    // them in one parallel wave. Recipes filter through the dishlist
+    // relation directly, so no separate dishlist-ID lookup is needed.
+    const [dishlists, recipes, followRelation] = await Promise.all([
       includeDishlists
-        ? dishlists.map((d) => d.id)
-        : includeRecipes
-          ? (
-              await prisma.dishList.findMany({
-                where: dishListWhere,
-                select: { id: true },
-              })
-            ).map((d) => d.id)
-          : [];
-
-    const recipes =
-      includeRecipes && dishlistIds.length > 0
-        ? await prisma.recipe.findMany({
+        ? prisma.dishList.findMany({
+            where: dishListWhere,
+            include: {
+              owner: {
+                select: {
+                  uid: true,
+                  username: true,
+                  firstName: true,
+                  lastName: true,
+                },
+              },
+              _count: {
+                select: {
+                  recipes: true,
+                  followers: true,
+                },
+              },
+              collaborators: {
+                where: { userId: currentUserId },
+              },
+              followers: {
+                where: { userId: currentUserId },
+              },
+              pins: {
+                where: { userId: currentUserId },
+                select: { userId: true },
+              },
+            },
+            orderBy: { createdAt: "desc" },
+          })
+        : [],
+      includeRecipes
+        ? prisma.recipe.findMany({
             where: {
               dishLists: {
                 some: {
-                  dishListId: { in: dishlistIds },
+                  dishList: dishListWhere,
                 },
               },
             },
@@ -826,26 +815,26 @@ router.get("/:userId", authToken, async (req: AuthRequest, res) => {
             skip: recipesOffset,
             take: recipesLimit,
           })
-        : [];
+        : [],
+      userId !== currentUserId
+        ? prisma.userFollow.findUnique({
+            where: {
+              followerId_followingId: {
+                followerId: currentUserId,
+                followingId: userId,
+              },
+            },
+          })
+        : null,
+    ]);
 
     // Check if current user is following this profile
     let followStatus: "NONE" | "PENDING" | "ACCEPTED" = "NONE";
     let isFollowing = false;
 
-    if (userId !== currentUserId) {
-      const followRelation = await prisma.userFollow.findUnique({
-        where: {
-          followerId_followingId: {
-            followerId: currentUserId,
-            followingId: userId,
-          },
-        },
-      });
-
-      if (followRelation) {
-        followStatus = followRelation.status;
-        isFollowing = followRelation.status === "ACCEPTED";
-      }
+    if (followRelation) {
+      followStatus = followRelation.status;
+      isFollowing = followRelation.status === "ACCEPTED";
     }
     res.json({
       user: {

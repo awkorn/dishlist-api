@@ -359,6 +359,17 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
     const dishListId = req.params.id;
     const userId = req.user!.uid;
 
+    // Bound the recipe payload; clients can page with recipesLimit/recipesOffset
+    // and use recipeCount to tell whether more exist.
+    const recipesLimitRaw = Number(req.query.recipesLimit ?? 60);
+    const recipesOffsetRaw = Number(req.query.recipesOffset ?? 0);
+    const recipesLimit = Number.isFinite(recipesLimitRaw)
+      ? Math.min(Math.max(recipesLimitRaw, 1), 200)
+      : 60;
+    const recipesOffset = Number.isFinite(recipesOffsetRaw)
+      ? Math.max(recipesOffsetRaw, 0)
+      : 0;
+
     // Build visibility condition
     const visibilityCondition = {
       OR: [
@@ -406,9 +417,25 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
                 creator: { status: "ACTIVE" },
               },
             },
-            include: {
+            select: {
               recipe: {
-                include: {
+                // Explicit select keeps the payload lean — notably omits
+                // `instructions` and `nutrition`, which the recipe detail
+                // screen fetches for itself via GET /recipes/:id.
+                select: {
+                  id: true,
+                  title: true,
+                  description: true,
+                  ingredients: true,
+                  tags: true,
+                  prepTime: true,
+                  cookTime: true,
+                  servings: true,
+                  imageUrl: true,
+                  imageUrls: true,
+                  creatorId: true,
+                  createdAt: true,
+                  updatedAt: true,
                   creator: {
                     select: {
                       uid: true,
@@ -421,6 +448,8 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
               },
             },
             orderBy: { addedAt: "desc" },
+            skip: recipesOffset,
+            take: recipesLimit,
           },
           pins: {
             where: { userId },
@@ -459,15 +488,14 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
         id: dr.recipe.id,
         title: dr.recipe.title,
         description: dr.recipe.description,
-        instructions: dr.recipe.instructions,
         ingredients: dr.recipe.ingredients,
         tags: dr.recipe.tags,
         prepTime: dr.recipe.prepTime,
         cookTime: dr.recipe.cookTime,
         servings: dr.recipe.servings,
         imageUrl: dr.recipe.imageUrl,
-        imageUrls: (dr.recipe as any).imageUrls?.length
-          ? (dr.recipe as any).imageUrls
+        imageUrls: dr.recipe.imageUrls?.length
+          ? dr.recipe.imageUrls
           : dr.recipe.imageUrl
             ? [dr.recipe.imageUrl]
             : [],
