@@ -33,7 +33,6 @@ export interface GeneratedRecipe {
   servings: number | null;
   ingredients: { type: "item" | "header"; text: string }[];
   instructions: { type: "item" | "header"; text: string }[];
-  tags: string[];
 }
 
 /**
@@ -103,9 +102,6 @@ export function normalizeRecipes(parsed: unknown): GeneratedRecipe[] | null {
       servings: typeof recipe.servings === "number" ? recipe.servings : null,
       ingredients: normalizeLines(recipe.ingredients),
       instructions: normalizeLines(recipe.instructions),
-      tags: Array.isArray(recipe.tags)
-        ? recipe.tags.filter((t): t is string => typeof t === "string")
-        : [],
     };
   });
 }

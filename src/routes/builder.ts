@@ -23,6 +23,7 @@ IMPORTANT RULES:
 - If the user refines a previous request (e.g., "make it spicier", "without dairy"), adjust ALL 4 recipes accordingly based on the conversation history
 - Include realistic prep/cook times and servings
 - Use subsection headers (type: "header") for ingredients/instructions when a recipe has distinct parts (e.g., "For the Sauce", "For the Dough")
+- Do not include tags
 
 RESPONSE FORMAT - respond with ONLY valid JSON, no markdown:
 {
@@ -41,8 +42,7 @@ RESPONSE FORMAT - respond with ONLY valid JSON, no markdown:
         { "type": "item", "text": "Preheat oven to 375°F" },
         { "type": "header", "text": "Making the Sauce" },
         { "type": "item", "text": "Heat oil in a saucepan over medium heat" }
-      ],
-      "tags": ["italian", "dinner", "comfort-food"]
+      ]
     }
   ]
 }`;
@@ -132,8 +132,9 @@ router.post(
 
     res.json({
       recipes,
-      // Return the assistant's raw content for conversation history
-      assistantContent: content,
+      // Return normalized content for conversation history so tags are not
+      // carried forward if the model includes them anyway.
+      assistantContent: JSON.stringify({ recipes }),
     });
   } catch (error) {
     console.error("Recipe generation error:", error);

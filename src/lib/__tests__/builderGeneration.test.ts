@@ -84,11 +84,10 @@ describe("normalizeRecipes", () => {
       servings: null,
       ingredients: [],
       instructions: [],
-      tags: [],
     });
   });
 
-  it("normalizes ingredient/instruction line types", () => {
+  it("normalizes ingredient/instruction line types and drops generated tags", () => {
     const recipes = normalizeRecipes({
       recipes: [
         {
@@ -108,7 +107,7 @@ describe("normalizeRecipes", () => {
       { type: "item", text: "water" },
       { type: "item", text: "salt" },
     ]);
-    expect(recipes[0].tags).toEqual(["dinner"]);
+    expect(recipes[0]).not.toHaveProperty("tags");
   });
 });
 
