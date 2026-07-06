@@ -44,6 +44,19 @@ export const inviteSendLimiter = rateLimit({
   message: { error: "Too many invites sent. Please wait a moment and try again." },
 });
 
+// Guards push-token registration. Combined with the per-user token cap in the
+// handler, this keeps a scripted client from churning rows. Default quotas —
+// safe launch defaults. Confirm/tune these (see PRODUCTION_READINESS.md:
+// notifications → product decision).
+export const pushTokenLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  limit: 20, // 20 registrations/min/user
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: keyByUser,
+  message: { error: "Too many requests. Please wait a moment and try again." },
+});
+
 // Guards shareable-link generation. Combined with link reuse in the handler,
 // this keeps a single user from minting rows in a loop.
 export const inviteLinkLimiter = rateLimit({
