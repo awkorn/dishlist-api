@@ -5,15 +5,26 @@ import {
   getBlockContext,
   getBlockedPeerIds,
 } from "../lib/blocks";
+import {
+  parseNotificationsListQuery,
+  parseInvitationData,
+} from "../lib/notificationHelpers";
+import { checkCollaboratorLimit } from "../lib/inviteValidation";
 
 const router = express.Router();
 
-// GET /notifications - Fetch all notifications for current user
+// Thrown inside the accept-invitation transaction to abort it when the
+// DishList is at capacity; mapped to a 400 in the route's catch.
+class CollaboratorLimitError extends Error {}
+
+// GET /notifications - Fetch notifications for current user (cursor-paginated)
 router.get("/", authToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.uid;
+    const { cursor, limit } = parseNotificationsListQuery(req.query);
     const blockedPeerIds = await getBlockedPeerIds(userId);
 
+    // Fetch one extra row to know whether another page exists.
     const notifications = await prisma.notification.findMany({
       where: {
         receiverId: userId,
@@ -36,13 +47,18 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
           },
         },
       },
-      orderBy: { createdAt: "desc" },
-      // Bound the payload; older notifications are rarely relevant and the
-      // client renders a flat recent list.
-      take: 50,
+      // id is a cuid tiebreaker so pagination is stable when several rows
+      // share a createdAt timestamp.
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: limit + 1,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     });
 
-    res.json({ notifications });
+    const hasMore = notifications.length > limit;
+    const page = hasMore ? notifications.slice(0, limit) : notifications;
+    const nextCursor = hasMore ? page[page.length - 1].id : null;
+
+    res.json({ notifications: page, nextCursor });
   } catch (error) {
     console.error("Get notifications error:", error);
     res.status(500).json({ error: "Failed to fetch notifications" });
@@ -197,9 +213,10 @@ router.post("/:id/accept-invitation", authToken, async (req: AuthRequest, res) =
       return res.status(403).json({ error: "Invitation is no longer available" });
     }
 
-    // Parse the data to get dishListId
-    const data = notification.data ? JSON.parse(notification.data) : null;
-    if (!data?.dishListId) {
+    // Parse the data to get dishListId (safe parse — malformed data is a 400,
+    // not an unhandled throw into the 500 path)
+    const data = parseInvitationData(notification.data);
+    if (!data) {
       return res.status(400).json({ error: "Invalid invitation data" });
     }
 
@@ -232,8 +249,18 @@ router.post("/:id/accept-invitation", authToken, async (req: AuthRequest, res) =
       return res.json({ success: true, message: "Already a collaborator" });
     }
 
-    // Add user as collaborator and delete the notification in a transaction
+    // Same cap the invite-link accept enforces (invites.ts) — accepting via
+    // notification must not become a bypass. Counted inside the transaction so
+    // concurrent accepts can't slip past together.
     await prisma.$transaction(async (tx) => {
+      const collabCount = await tx.dishListCollaborator.count({
+        where: { dishListId },
+      });
+      const overLimit = checkCollaboratorLimit(collabCount);
+      if (overLimit) {
+        throw new CollaboratorLimitError(overLimit.error);
+      }
+
       // Add as collaborator
       await tx.dishListCollaborator.create({
         data: {
@@ -278,6 +305,9 @@ router.post("/:id/accept-invitation", authToken, async (req: AuthRequest, res) =
 
     res.json({ success: true, dishListId });
   } catch (error) {
+    if (error instanceof CollaboratorLimitError) {
+      return res.status(400).json({ error: error.message, code: "LIMIT_REACHED" });
+    }
     console.error("Accept invitation error:", error);
     res.status(500).json({ error: "Failed to accept invitation" });
   }
