@@ -1,13 +1,18 @@
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import type { AuthRequest } from "./auth";
 
 // Per-user limiters. Must run AFTER authToken so req.user is populated; fall
 // back to IP for safety.
 //
+// The IP fallback runs through ipKeyGenerator so IPv6 addresses collapse to a
+// subnet — otherwise a client could rotate within its /64 to dodge the limit,
+// and express-rate-limit v8 rejects a raw req.ip keyGenerator for that reason.
+//
 // NOTE: uses the default in-memory store, which is per-instance. Fine for a
 // single API instance at launch; move to a shared store (e.g. Redis) if the
 // API is ever horizontally scaled.
-const keyByUser = (req: AuthRequest) => req.user?.uid ?? req.ip ?? "anonymous";
+const keyByUser = (req: AuthRequest) =>
+  req.user?.uid ?? (req.ip ? ipKeyGenerator(req.ip) : "anonymous");
 
 // Guards the paid AI generation endpoint. Default quotas — safe launch
 // defaults. Confirm/tune these (see PRODUCTION_READINESS.md: builder →
