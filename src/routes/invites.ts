@@ -6,19 +6,21 @@ import {
   filterBlockedRecipientIds,
   getBlockContext,
 } from "../lib/blocks";
+import {
+  MAX_COLLABORATORS,
+  checkCollaboratorLimit,
+  checkInviteRecipient,
+  checkInviteUsable,
+  evaluateAcceptEligibility,
+  getInviteExpiryDate,
+  normalizeRecipientIds,
+} from "../lib/inviteValidation";
+import { inviteSendLimiter, inviteLinkLimiter } from "../middleware/rateLimit";
 
 const router = Router();
 
-// Constants
-const INVITE_EXPIRY_DAYS = 7;
-const MAX_COLLABORATORS = 100;
-
-// Helper: Calculate expiry date
-const getExpiryDate = () => {
-  const date = new Date();
-  date.setDate(date.getDate() + INVITE_EXPIRY_DAYS);
-  return date;
-};
+// Helper: Calculate expiry date (7 days out; see inviteValidation)
+const getExpiryDate = () => getInviteExpiryDate();
 
 // Helper: Get display name
 const getDisplayName = (user: { firstName?: string | null; username?: string | null }) => {
@@ -29,16 +31,22 @@ const getDisplayName = (user: { firstName?: string | null; username?: string | n
 // POST /invites/dishlist/:id/send
 // Send invite to mutual(s) - creates notification + invite record
 // ============================================
-router.post("/dishlist/:id/send", authToken, async (req: AuthRequest, res) => {
+router.post(
+  "/dishlist/:id/send",
+  authToken,
+  inviteSendLimiter,
+  async (req: AuthRequest, res) => {
   try {
     const dishListId = req.params.id;
     const userId = req.user!.uid;
-    const { recipientIds } = req.body;
 
-    // Validate recipientIds
-    if (!recipientIds || !Array.isArray(recipientIds) || recipientIds.length === 0) {
-      return res.status(400).json({ error: "At least one recipient is required" });
+    // Validate + normalize recipientIds before any DB work: array of unique,
+    // non-empty strings, excluding self, capped at MAX_SEND_RECIPIENTS.
+    const parsed = normalizeRecipientIds(req.body?.recipientIds, userId);
+    if (!parsed.ok) {
+      return res.status(400).json({ error: parsed.error });
     }
+    const recipientIds = parsed.recipientIds;
 
     // Get the DishList and verify ownership
     const dishList = await prisma.dishList.findUnique({
@@ -201,7 +209,11 @@ router.post("/dishlist/:id/send", authToken, async (req: AuthRequest, res) => {
 // POST /invites/dishlist/:id/link
 // Generate a shareable invite link (owner only)
 // ============================================
-router.post("/dishlist/:id/link", authToken, async (req: AuthRequest, res) => {
+router.post(
+  "/dishlist/:id/link",
+  authToken,
+  inviteLinkLimiter,
+  async (req: AuthRequest, res) => {
   try {
     const dishListId = req.params.id;
     const userId = req.user!.uid;
@@ -219,15 +231,28 @@ router.post("/dishlist/:id/link", authToken, async (req: AuthRequest, res) => {
       return res.status(403).json({ error: "Only the owner can generate invite links" });
     }
 
-    // Create a link invite (no inviteeId - anyone can use)
-    const invite = await prisma.dishListInvite.create({
-      data: {
+    // Reuse an existing unexpired open invite if one is available, so repeated
+    // copy/share taps don't mint a new row every time.
+    const existing = await prisma.dishListInvite.findFirst({
+      where: {
         dishListId,
-        inviterId: userId,
-        inviteeId: null, // Open invite
-        expiresAt: getExpiryDate(),
+        inviteeId: null,
+        usedAt: null,
+        expiresAt: { gt: new Date() },
       },
+      orderBy: { createdAt: "desc" },
     });
+
+    const invite =
+      existing ??
+      (await prisma.dishListInvite.create({
+        data: {
+          dishListId,
+          inviterId: userId,
+          inviteeId: null, // Open invite
+          expiresAt: getExpiryDate(),
+        },
+      }));
 
     res.json({
       success: true,
@@ -280,32 +305,30 @@ router.post("/:token/validate", optionalAuthToken, async (req: AuthRequest, res)
     if (!invite) {
       return res.status(404).json({ error: "Invite not found", code: "NOT_FOUND" });
     }
-    if (
-      invite.inviter.status !== "ACTIVE" ||
-      invite.dishList.owner.status !== "ACTIVE" ||
-      invite.dishList.moderationState !== "VISIBLE"
-    ) {
-      return res.status(410).json({
-        error: "This invite is no longer available",
-        code: "UNAVAILABLE",
+
+    // Shared availability chain: live account/list, unexpired, unused.
+    const unusable = checkInviteUsable({
+      inviterStatus: invite.inviter.status,
+      ownerStatus: invite.dishList.owner.status,
+      moderationState: invite.dishList.moderationState,
+      expiresAt: invite.expiresAt,
+      usedAt: invite.usedAt,
+      inviteeId: invite.inviteeId,
+      ownerId: invite.dishList.ownerId,
+    });
+    if (unusable) {
+      return res.status(unusable.status).json({
+        error: unusable.error,
+        code: unusable.code,
       });
     }
 
-    // Check if expired
-    if (invite.expiresAt < new Date()) {
-      return res.status(410).json({ error: "Invite has expired", code: "EXPIRED" });
-    }
-
-    // Check if already used
-    if (invite.usedAt) {
-      return res.status(410).json({ error: "Invite has already been used", code: "ALREADY_USED" });
-    }
-
-    // Check if invite is for specific user
-    if (invite.inviteeId && invite.inviteeId !== userId) {
-      return res.status(403).json({
-        error: "This invite is for another user",
-        code: "WRONG_USER",
+    // Direct invites are addressed to a specific user.
+    const wrongUser = checkInviteRecipient(invite.inviteeId, userId);
+    if (wrongUser) {
+      return res.status(wrongUser.status).json({
+        error: wrongUser.error,
+        code: wrongUser.code,
       });
     }
 
@@ -389,43 +412,33 @@ router.post("/:token/accept", authToken, async (req: AuthRequest, res) => {
     if (!invite) {
       return res.status(404).json({ error: "Invite not found", code: "NOT_FOUND" });
     }
-    if (
-      invite.inviter.status !== "ACTIVE" ||
-      invite.dishList.owner.status !== "ACTIVE" ||
-      invite.dishList.moderationState !== "VISIBLE"
-    ) {
-      return res.status(410).json({
-        error: "This invite is no longer available",
-        code: "UNAVAILABLE",
-      });
-    }
-
-    // Validations
-    if (invite.expiresAt < new Date()) {
-      return res.status(410).json({ error: "Invite has expired", code: "EXPIRED" });
-    }
-
-    if (invite.usedAt) {
-      return res.status(410).json({ error: "Invite has already been used", code: "ALREADY_USED" });
-    }
-
-    if (invite.inviteeId && invite.inviteeId !== userId) {
-      return res.status(403).json({ error: "This invite is for another user", code: "WRONG_USER" });
-    }
-
-    if (invite.dishList.ownerId === userId) {
-      return res.status(400).json({ error: "You cannot collaborate on your own DishList", code: "IS_OWNER" });
-    }
 
     const blockContext = await getBlockContext(userId);
 
-    if (
-      blockContext.isBlocked(invite.inviterId) ||
-      blockContext.isBlocked(invite.dishList.ownerId)
-    ) {
-      return res.status(403).json({
-        error: "This invite is no longer available",
-        code: "BLOCKED",
+    // Full eligibility chain: usable → correct recipient → not owner → not
+    // blocked. The collaborator limit is checked separately below, after the
+    // already-a-collaborator short-circuit.
+    const ineligible = evaluateAcceptEligibility(
+      {
+        inviterStatus: invite.inviter.status,
+        ownerStatus: invite.dishList.owner.status,
+        moderationState: invite.dishList.moderationState,
+        expiresAt: invite.expiresAt,
+        usedAt: invite.usedAt,
+        inviteeId: invite.inviteeId,
+        ownerId: invite.dishList.ownerId,
+      },
+      {
+        userId,
+        isBlocked:
+          blockContext.isBlocked(invite.inviterId) ||
+          blockContext.isBlocked(invite.dishList.ownerId),
+      }
+    );
+    if (ineligible) {
+      return res.status(ineligible.status).json({
+        error: ineligible.error,
+        code: ineligible.code,
       });
     }
 
@@ -457,10 +470,11 @@ router.post("/:token/accept", authToken, async (req: AuthRequest, res) => {
       where: { dishListId: invite.dishListId },
     });
 
-    if (collabCount >= MAX_COLLABORATORS) {
-      return res.status(400).json({
-        error: "This DishList has reached its collaborator limit",
-        code: "LIMIT_REACHED",
+    const overLimit = checkCollaboratorLimit(collabCount);
+    if (overLimit) {
+      return res.status(overLimit.status).json({
+        error: overLimit.error,
+        code: overLimit.code,
       });
     }
 
