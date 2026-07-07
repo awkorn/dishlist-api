@@ -6,58 +6,38 @@ import {
   handleModerationError,
   moderateImage,
 } from "../lib/moderation";
+import {
+  handleImageUploadError,
+  normalizeUploadedImage,
+} from "../lib/uploadedImages";
 
 const router = Router();
 
 const ALLOWED_FOLDERS = new Set(["avatars", "recipes"]);
-const ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
-
-function extensionForMimeType(mimeType: string) {
-  switch (mimeType) {
-    case "image/png":
-      return "png";
-    case "image/webp":
-      return "webp";
-    default:
-      return "jpg";
-  }
-}
-
 router.post("/image", authToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.uid;
-    const { base64, mimeType = "image/jpeg", folder } = req.body;
+    const { base64, folder } = req.body;
 
     if (!ALLOWED_FOLDERS.has(folder)) {
       return res.status(400).json({ error: "Invalid image folder" });
     }
 
-    if (!ALLOWED_MIME_TYPES.has(mimeType)) {
-      return res.status(400).json({ error: "Unsupported image type" });
-    }
+    const image = await normalizeUploadedImage(base64);
 
-    if (typeof base64 !== "string" || !base64.trim()) {
-      return res.status(400).json({ error: "Image data is required" });
-    }
-
-    const normalizedBase64 = base64.replace(/^data:[^;]+;base64,/, "");
-    const dataUrl = `data:${mimeType};base64,${normalizedBase64}`;
-
-    await moderateImage(dataUrl, {
+    await moderateImage(image.dataUrl, {
       targetType: "IMAGE",
       userId,
     });
 
-    const bytes = Buffer.from(normalizedBase64, "base64");
-    const extension = extensionForMimeType(mimeType);
     const filename = `${userId}/${Date.now()}-${crypto
       .randomBytes(6)
-      .toString("hex")}.${extension}`;
+      .toString("hex")}.${image.extension}`;
 
     const { error } = await supabaseAdmin.storage
       .from(folder)
-      .upload(filename, bytes, {
-        contentType: mimeType,
+      .upload(filename, image.bytes, {
+        contentType: image.mimeType,
         upsert: false,
       });
 
@@ -70,6 +50,7 @@ router.post("/image", authToken, async (req: AuthRequest, res) => {
 
     res.status(201).json({ publicUrl: data.publicUrl });
   } catch (error) {
+    if (handleImageUploadError(error, res)) return;
     if (handleModerationError(error, res)) return;
 
     console.error("Moderated image upload error:", error);
