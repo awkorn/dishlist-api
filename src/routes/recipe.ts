@@ -23,11 +23,27 @@ import {
   validateOptionalText,
   validateRequiredText,
 } from "../lib/requestValidation";
+import {
+  MAX_RECIPE_TITLE_LENGTH,
+  MAX_RECIPE_DESCRIPTION_LENGTH,
+  normalizeRecipeImages,
+  normalizeRecipeNotes,
+  validateRecipeItemLimits,
+  validateRecipeNumericFields,
+  validateNutritionField,
+  validateImportImages,
+  normalizeImportedRecipe,
+  getImportWarnings,
+} from "../lib/recipeValidation";
+import { extractMessageContent } from "../lib/builderGeneration";
+import { normalizeRecipientIds } from "../lib/inviteValidation";
+import {
+  recipeImportLimiter,
+  recipeImportDailyLimiter,
+  recipeShareLimiter,
+} from "../middleware/rateLimit";
 
 const router = Router();
-const MAX_RECIPE_IMAGES = 4;
-const MAX_RECIPE_TITLE_LENGTH = 100;
-const MAX_RECIPE_DESCRIPTION_LENGTH = 1000;
 
 function isAllowedRecipeImageUrl(url: string) {
   return url.startsWith(
@@ -51,40 +67,6 @@ function recipeModerationFields(input: {
     { label: "Recipe notes", value: input.notes },
     { label: "Recipe tags", value: input.tags },
   ];
-}
-
-function normalizeRecipeImages(
-  imageUrls: unknown,
-  imageUrl: unknown
-): { urls?: string[]; error?: string } {
-  const rawUrls =
-    imageUrls !== undefined
-      ? imageUrls
-      : typeof imageUrl === "string" && imageUrl.trim()
-        ? [imageUrl]
-        : [];
-
-  if (!Array.isArray(rawUrls)) {
-    return { error: "imageUrls must be an array" };
-  }
-
-  if (rawUrls.length > MAX_RECIPE_IMAGES) {
-    return { error: `Maximum ${MAX_RECIPE_IMAGES} images allowed` };
-  }
-
-  const urls: string[] = [];
-  for (const rawUrl of rawUrls) {
-    if (typeof rawUrl !== "string") {
-      return { error: "Each image URL must be a string" };
-    }
-
-    const trimmedUrl = rawUrl.trim();
-    if (trimmedUrl) {
-      urls.push(trimmedUrl);
-    }
-  }
-
-  return { urls };
 }
 
 function recipeWithImageUrls<T extends { imageUrl?: string | null }>(
@@ -112,32 +94,6 @@ function getShareableRecipeEntryWhere(recipeId: string) {
       visibility: "PUBLIC" as const,
     },
   };
-}
-
-function normalizeRecipeNotes(
-  notes: unknown
-): { notes?: string[]; error?: string } {
-  if (notes === undefined || notes === null) {
-    return { notes: [] };
-  }
-
-  if (!Array.isArray(notes)) {
-    return { error: "notes must be an array" };
-  }
-
-  const normalizedNotes: string[] = [];
-  for (const note of notes) {
-    if (typeof note !== "string") {
-      return { error: "Each note must be a string" };
-    }
-
-    const trimmedNote = note.trim();
-    if (trimmedNote) {
-      normalizedNotes.push(trimmedNote);
-    }
-  }
-
-  return { notes: normalizedNotes };
 }
 
 // Create recipe and add to dishlist
@@ -188,6 +144,37 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
     const instructionsError = validateRecipeItems(instructions, "instructions");
     if (instructionsError) {
       return res.status(400).json({ error: instructionsError });
+    }
+
+    // Cap list sizes and per-item length (backstop against oversized payloads)
+    const ingredientsLimitError = validateRecipeItemLimits(
+      ingredients,
+      "ingredients"
+    );
+    if (ingredientsLimitError) {
+      return res.status(400).json({ error: ingredientsLimitError });
+    }
+    const instructionsLimitError = validateRecipeItemLimits(
+      instructions,
+      "instructions"
+    );
+    if (instructionsLimitError) {
+      return res.status(400).json({ error: instructionsLimitError });
+    }
+
+    // Validate numeric fields (prep/cook/servings) and the nutrition blob
+    const numericFields = validateRecipeNumericFields({
+      prepTime,
+      cookTime,
+      servings,
+    });
+    if (!numericFields.ok) {
+      return res.status(400).json({ error: numericFields.error });
+    }
+
+    const validatedNutrition = validateNutritionField(nutrition);
+    if (!validatedNutrition.ok) {
+      return res.status(400).json({ error: validatedNutrition.error });
     }
 
     if (dishListId) {
@@ -248,45 +235,49 @@ router.post("/", authToken, async (req: AuthRequest, res) => {
       { targetType: "RECIPE", userId }
     );
 
-    // Create recipe
-    const recipe = await prisma.recipe.create({
-      data: {
-        title: validatedTitle.value,
-        description: validatedDescription.value,
-        instructions: cleanedInstructions as any,
-        ingredients: cleanedIngredients as any,
-        prepTime: prepTime || null,
-        cookTime: cookTime || null,
-        servings: servings || null,
-        imageUrl: recipeImageUrls[0] || null,
-        imageUrls: recipeImageUrls,
-        nutrition: nutrition || null,
-        notes: normalizedNotes.notes || [],
-        tags: tags ? normalizeTags(tags) : [],
-        creatorId: userId,
-      } as any,
-      include: {
-        creator: {
-          select: {
-            uid: true,
-            username: true,
-            firstName: true,
-            lastName: true,
+    // Create recipe (and attach to the dishlist) atomically so a failed attach
+    // can't leave an orphaned recipe that belongs to no list.
+    const recipe = await prisma.$transaction(async (tx) => {
+      const created = await tx.recipe.create({
+        data: {
+          title: validatedTitle.value,
+          description: validatedDescription.value,
+          instructions: cleanedInstructions as any,
+          ingredients: cleanedIngredients as any,
+          prepTime: numericFields.value.prepTime,
+          cookTime: numericFields.value.cookTime,
+          servings: numericFields.value.servings,
+          imageUrl: recipeImageUrls[0] || null,
+          imageUrls: recipeImageUrls,
+          nutrition: validatedNutrition.value,
+          notes: normalizedNotes.notes || [],
+          tags: tags ? normalizeTags(tags) : [],
+          creatorId: userId,
+        } as any,
+        include: {
+          creator: {
+            select: {
+              uid: true,
+              username: true,
+              firstName: true,
+              lastName: true,
+            },
           },
         },
-      },
-    });
-
-    // Add to dishlist if provided
-    if (dishListId) {
-      await prisma.dishListRecipe.create({
-        data: {
-          dishListId,
-          recipeId: recipe.id,
-          addedById: userId,
-        },
       });
-    }
+
+      if (dishListId) {
+        await tx.dishListRecipe.create({
+          data: {
+            dishListId,
+            recipeId: created.id,
+            addedById: userId,
+          },
+        });
+      }
+
+      return created;
+    });
 
     res.status(201).json({ recipe: recipeWithImageUrls(recipe) });
   } catch (error) {
@@ -359,22 +350,25 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
 });
 
 // Share a Recipe
-router.post("/:id/share", authToken, async (req: AuthRequest, res) => {
+router.post(
+  "/:id/share",
+  authToken,
+  recipeShareLimiter,
+  async (req: AuthRequest, res) => {
   try {
     const recipeId = req.params.id;
     const userId = req.user!.uid;
-    const { recipientIds } = req.body;
 
-    // Validate recipientIds
-    if (
-      !recipientIds ||
-      !Array.isArray(recipientIds) ||
-      recipientIds.length === 0
-    ) {
-      return res
-        .status(400)
-        .json({ error: "At least one recipient is required" });
+    // Validate + normalize recipientIds (string check, trim, dedupe, drop self,
+    // cap at MAX_SEND_RECIPIENTS) before any DB work.
+    const normalizedRecipients = normalizeRecipientIds(
+      req.body?.recipientIds,
+      userId
+    );
+    if (!normalizedRecipients.ok) {
+      return res.status(400).json({ error: normalizedRecipients.error });
     }
+    const recipientIds = normalizedRecipients.recipientIds;
 
     const [recipe, blockContext] = await Promise.all([
       prisma.recipe.findUnique({
@@ -431,13 +425,9 @@ router.post("/:id/share", authToken, async (req: AuthRequest, res) => {
     // Build sender display name
     const senderName = sender.firstName || sender.username || "Someone";
 
-    const allowedRecipientIds = Array.from(
-      new Set(
-        recipientIds.filter(
-          (recipientId: string) =>
-            recipientId !== userId && !blockContext.isBlocked(recipientId)
-        )
-      )
+    // recipientIds is already deduped and self-excluded; drop blocked users.
+    const allowedRecipientIds = recipientIds.filter(
+      (recipientId: string) => !blockContext.isBlocked(recipientId)
     );
     if (allowedRecipientIds.length === 0) {
       return res.json({
@@ -550,6 +540,37 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
       return res.status(400).json({ error: instructionsError });
     }
 
+    // Cap list sizes and per-item length (backstop against oversized payloads)
+    const ingredientsLimitError = validateRecipeItemLimits(
+      ingredients,
+      "ingredients"
+    );
+    if (ingredientsLimitError) {
+      return res.status(400).json({ error: ingredientsLimitError });
+    }
+    const instructionsLimitError = validateRecipeItemLimits(
+      instructions,
+      "instructions"
+    );
+    if (instructionsLimitError) {
+      return res.status(400).json({ error: instructionsLimitError });
+    }
+
+    // Validate numeric fields (prep/cook/servings) and the nutrition blob
+    const numericFields = validateRecipeNumericFields({
+      prepTime,
+      cookTime,
+      servings,
+    });
+    if (!numericFields.ok) {
+      return res.status(400).json({ error: numericFields.error });
+    }
+
+    const validatedNutrition = validateNutritionField(nutrition);
+    if (!validatedNutrition.ok) {
+      return res.status(400).json({ error: validatedNutrition.error });
+    }
+
     const tagsError = validateTags(tags);
     if (tagsError) {
       return res.status(400).json({ error: tagsError });
@@ -604,7 +625,7 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
       JSON.stringify(cleanedIngredients);
     const nutritionData = ingredientsChanged
       ? null
-      : nutrition || existingRecipe.nutrition;
+      : (validatedNutrition.value ?? existingRecipe.nutrition);
 
     // Update recipe
     const updatedRecipe = await prisma.recipe.update({
@@ -614,9 +635,9 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
         description: validatedDescription.value,
         instructions: cleanedInstructions as any,
         ingredients: cleanedIngredients as any,
-        prepTime: prepTime || null,
-        cookTime: cookTime || null,
-        servings: servings || null,
+        prepTime: numericFields.value.prepTime,
+        cookTime: numericFields.value.cookTime,
+        servings: numericFields.value.servings,
         imageUrl: recipeImageUrls[0] || null,
         imageUrls: recipeImageUrls,
         nutrition: nutritionData,
@@ -692,38 +713,30 @@ router.get("/:id/dishlists", authToken, async (req: AuthRequest, res) => {
 });
 
 // Import recipe from images using GPT-4 Vision
-router.post("/import-from-images", authToken, async (req: AuthRequest, res) => {
+router.post(
+  "/import-from-images",
+  authToken,
+  recipeImportLimiter,
+  recipeImportDailyLimiter,
+  async (req: AuthRequest, res) => {
   try {
-    const { images } = req.body;
-
-    // Validate images array
-    if (!Array.isArray(images) || images.length === 0) {
-      return res.status(400).json({ error: "At least one image is required" });
+    // Validate images: array of 1-5, each with a string base64 (≤2MB) and an
+    // allowlisted mimeType. Rejects oversized/malformed payloads before the
+    // (expensive) model call.
+    const validatedImages = validateImportImages(req.body?.images);
+    if (!validatedImages.ok) {
+      return res.status(400).json({ error: validatedImages.error });
     }
-
-    if (images.length > 5) {
-      return res.status(400).json({ error: "Maximum 5 images allowed" });
-    }
-
-    // Validate each image is base64
-    for (const img of images) {
-      if (!img.base64 || !img.mimeType) {
-        return res.status(400).json({
-          error: "Each image must have base64 and mimeType properties",
-        });
-      }
-    }
+    const images = validatedImages.value;
 
     // Build content array for GPT-4 Vision
-    const imageContent = images.map(
-      (img: { base64: string; mimeType: string }) => ({
-        type: "image_url" as const,
-        image_url: {
-          url: `data:${img.mimeType};base64,${img.base64}`,
-          detail: "high" as const,
-        },
-      })
-    );
+    const imageContent = images.map((img) => ({
+      type: "image_url" as const,
+      image_url: {
+        url: `data:${img.mimeType};base64,${img.base64}`,
+        detail: "high" as const,
+      },
+    }));
 
     const prompt = `You are a recipe extraction assistant. Analyze the provided image(s) of a recipe and extract all available information.
 
@@ -784,13 +797,21 @@ Rules:
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
       console.error("OpenAI API error:", errorData);
-      throw new Error("Failed to process images with AI");
+      return res
+        .status(502)
+        .json({ error: "Failed to import recipe from images" });
     }
 
     const data = await response.json();
-    const content = data.choices[0].message.content;
+    const content = extractMessageContent(data);
+    if (content === null) {
+      console.error("OpenAI response missing message content:", data);
+      return res
+        .status(502)
+        .json({ error: "Failed to import recipe from images" });
+    }
 
-    let extractedRecipe;
+    let extractedRecipe: unknown;
     try {
       extractedRecipe = JSON.parse(content);
     } catch {
@@ -799,40 +820,8 @@ Rules:
     }
 
     // Validate and normalize the response
-    const recipe = {
-      title: extractedRecipe.title || "",
-      prepTime:
-        typeof extractedRecipe.prepTime === "number"
-          ? extractedRecipe.prepTime
-          : null,
-      cookTime:
-        typeof extractedRecipe.cookTime === "number"
-          ? extractedRecipe.cookTime
-          : null,
-      servings:
-        typeof extractedRecipe.servings === "number"
-          ? extractedRecipe.servings
-          : null,
-      ingredients: Array.isArray(extractedRecipe.ingredients)
-        ? extractedRecipe.ingredients
-        : [],
-      instructions: Array.isArray(extractedRecipe.instructions)
-        ? extractedRecipe.instructions
-        : [],
-    };
-
-    // Check what's missing for warnings
-    const warnings: string[] = [];
-    if (!recipe.title) warnings.push("Could not extract recipe title");
-    if (recipe.ingredients.length === 0)
-      warnings.push("Could not extract ingredients");
-    if (recipe.instructions.length === 0)
-      warnings.push("Could not extract instructions");
-    if (recipe.prepTime === null && recipe.cookTime === null) {
-      warnings.push("Could not extract cooking times");
-    }
-    if (recipe.servings === null)
-      warnings.push("Could not extract serving size");
+    const recipe = normalizeImportedRecipe(extractedRecipe);
+    const warnings = getImportWarnings(recipe);
 
     res.json({
       recipe,

@@ -1,5 +1,11 @@
 import { Router } from "express";
 import { authToken, AuthRequest } from "../middleware/auth";
+import {
+  nutritionLimiter,
+  nutritionDailyLimiter,
+} from "../middleware/rateLimit";
+import { validateNutritionRequest } from "../lib/recipeValidation";
+import { extractMessageContent } from "../lib/builderGeneration";
 
 const router = Router();
 
@@ -11,17 +17,21 @@ interface NutritionInfo {
   fat?: number;
 }
 
-router.post("/calculate", authToken, async (req: AuthRequest, res) => {
+router.post(
+  "/calculate",
+  authToken,
+  nutritionLimiter,
+  nutritionDailyLimiter,
+  async (req: AuthRequest, res) => {
   try {
-    const { ingredients, servings } = req.body;
-
-    if (!Array.isArray(ingredients) || ingredients.length === 0) {
-      return res.status(400).json({ error: "Ingredients array is required" });
+    const validated = validateNutritionRequest(
+      req.body?.ingredients,
+      req.body?.servings
+    );
+    if (!validated.ok) {
+      return res.status(400).json({ error: validated.error });
     }
-
-    if (!servings || servings < 1) {
-      return res.status(400).json({ error: "Valid servings number is required" });
-    }
+    const { ingredients, servings } = validated.value;
 
     const prompt = `
 Calculate nutritional information PER SERVING for a recipe with ${servings} servings.
@@ -57,11 +67,17 @@ Use grams for macros. Calories is total calories.`;
     });
 
     if (!response.ok) {
-      throw new Error("Failed to calculate nutrition with OpenAI");
+      const errorData = await response.json().catch(() => ({}));
+      console.error("OpenAI API error:", errorData);
+      return res.status(502).json({ error: "Failed to calculate nutrition" });
     }
 
     const data = await response.json();
-    const content = data.choices[0].message.content;
+    const content = extractMessageContent(data);
+    if (content === null) {
+      console.error("OpenAI response missing message content:", data);
+      return res.status(502).json({ error: "Failed to calculate nutrition" });
+    }
 
     let nutritionData: NutritionInfo;
 
