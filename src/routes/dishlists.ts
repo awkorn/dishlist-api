@@ -19,6 +19,8 @@ import {
   validateOptionalEnum,
   validateRequiredText,
 } from "../lib/requestValidation";
+import { normalizeRecipientIds } from "../lib/inviteValidation";
+import { dishlistShareLimiter } from "../middleware/rateLimit";
 
 const router = Router();
 const DISHLIST_TITLE_MIN_LENGTH = 2;
@@ -933,22 +935,25 @@ router.delete(
 );
 
 // Share a DishList with multiple users (creates notifications)
-router.post("/:id/share", authToken, async (req: AuthRequest, res) => {
+router.post(
+  "/:id/share",
+  authToken,
+  dishlistShareLimiter,
+  async (req: AuthRequest, res) => {
   try {
     const dishListId = req.params.id;
     const userId = req.user!.uid;
-    const { recipientIds } = req.body;
 
-    // Validate recipientIds
-    if (
-      !recipientIds ||
-      !Array.isArray(recipientIds) ||
-      recipientIds.length === 0
-    ) {
-      return res
-        .status(400)
-        .json({ error: "At least one recipient is required" });
+    // Validate + normalize recipientIds (string check, trim, dedupe, drop self,
+    // cap at MAX_SEND_RECIPIENTS) before any DB work.
+    const normalizedRecipients = normalizeRecipientIds(
+      req.body?.recipientIds,
+      userId
+    );
+    if (!normalizedRecipients.ok) {
+      return res.status(400).json({ error: normalizedRecipients.error });
     }
+    const recipientIds = normalizedRecipients.recipientIds;
 
     const [dishList, sender, blockContext] = await Promise.all([
       prisma.dishList.findUnique({
@@ -998,13 +1003,9 @@ router.post("/:id/share", authToken, async (req: AuthRequest, res) => {
     // Build sender display name
     const senderName = sender.firstName || sender.username || "Someone";
 
-    const allowedRecipientIds = Array.from(
-      new Set(
-        recipientIds.filter(
-          (recipientId: string) =>
-            recipientId !== userId && !blockContext.isBlocked(recipientId)
-        )
-      )
+    // recipientIds is already deduped and self-excluded; drop blocked users.
+    const allowedRecipientIds = recipientIds.filter(
+      (recipientId: string) => !blockContext.isBlocked(recipientId)
     );
     if (allowedRecipientIds.length === 0) {
       return res.json({
@@ -1041,7 +1042,8 @@ router.post("/:id/share", authToken, async (req: AuthRequest, res) => {
     console.error("Share dishlist error:", error);
     res.status(500).json({ error: "Failed to share DishList" });
   }
-});
+  }
+);
 
 // ============================================
 // GET /:id/collaborators
