@@ -63,6 +63,22 @@ export function validateOptionalText(
   return { value: normalized };
 }
 
+/**
+ * Coerce an Express query param (which may be a string, an array of strings for
+ * repeated keys, or undefined) into a single trimmed, length-capped search
+ * string. Array-valued / non-string params collapse to "" so they can never be
+ * passed straight into a Prisma `contains` filter (which throws → 500).
+ */
+export function normalizeSearchParam(
+  value: unknown,
+  maxLength: number,
+): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.trim().slice(0, maxLength);
+}
+
 export function validateOptionalEnum<T extends string>(
   value: unknown,
   options: {

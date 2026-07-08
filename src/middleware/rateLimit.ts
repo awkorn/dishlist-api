@@ -134,6 +134,18 @@ export const recipeShareLimiter = rateLimit({
   message: { error: "Too many shares. Please wait a moment and try again." },
 });
 
+// Guards DishList sharing against the same notification fan-out abuse as
+// recipe sharing. Kept as its own limiter so a DishList-share burst and a
+// recipe-share burst don't drain each other's budget.
+export const dishlistShareLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  limit: 20, // 20 share-requests/min/user
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: keyByUser,
+  message: { error: "Too many shares. Please wait a moment and try again." },
+});
+
 // Guards the search endpoint. Each call runs several DB queries (social graph +
 // saved recipes + 1-3 scored searches with wide `take` windows), so it's a
 // heavier read than most. The client already debounces at 300ms; this bounds

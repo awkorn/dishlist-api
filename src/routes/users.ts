@@ -17,9 +17,12 @@ import {
   validateProfileInput,
 } from "../lib/profileValidation";
 import { parsePageLimit } from "../lib/pagination";
+import { normalizeSearchParam } from "../lib/requestValidation";
 
 const router = Router();
 const USER_STORAGE_BUCKETS = ["avatars", "recipes"] as const;
+const MUTUALS_SEARCH_MAX_LENGTH = 100;
+const MUTUALS_LIMIT = 100;
 
 function isAllowedAvatarUrl(url: string) {
   return url.startsWith(
@@ -511,7 +514,12 @@ router.delete("/me", authToken, async (req: AuthRequest, res) => {
 router.get("/mutuals", authToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.uid;
-    const { search } = req.query;
+    // Coerce a single string; array-valued (?search=a&search=b) or non-string
+    // params collapse to "" rather than getting thrown into Prisma `contains`.
+    const search = normalizeSearchParam(
+      req.query.search,
+      MUTUALS_SEARCH_MAX_LENGTH
+    );
     const { blockedPeerIds } = await getBlockContext(userId);
 
     // Find users where:
@@ -548,19 +556,19 @@ router.get("/mutuals", authToken, async (req: AuthRequest, res) => {
                   OR: [
                     {
                       username: {
-                        contains: search as string,
+                        contains: search,
                         mode: "insensitive" as const,
                       },
                     },
                     {
                       firstName: {
-                        contains: search as string,
+                        contains: search,
                         mode: "insensitive" as const,
                       },
                     },
                     {
                       lastName: {
-                        contains: search as string,
+                        contains: search,
                         mode: "insensitive" as const,
                       },
                     },
@@ -578,6 +586,7 @@ router.get("/mutuals", authToken, async (req: AuthRequest, res) => {
         avatarUrl: true,
       },
       orderBy: [{ firstName: "asc" }, { lastName: "asc" }, { username: "asc" }],
+      take: MUTUALS_LIMIT,
     });
 
     res.json({ mutuals });
