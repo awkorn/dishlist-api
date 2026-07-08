@@ -133,3 +133,17 @@ export const recipeShareLimiter = rateLimit({
   keyGenerator: keyByUser,
   message: { error: "Too many shares. Please wait a moment and try again." },
 });
+
+// Guards the search endpoint. Each call runs several DB queries (social graph +
+// saved recipes + 1-3 scored searches with wide `take` windows), so it's a
+// heavier read than most. The client already debounces at 300ms; this bounds
+// scripted abuse. Generous default — safe launch value (see
+// PRODUCTION_READINESS.md: search → product decision).
+export const searchLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  limit: 60, // 60 searches/min/user
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: keyByUser,
+  message: { error: "Too many searches. Please wait a moment and try again." },
+});

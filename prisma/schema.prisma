@@ -60,6 +60,10 @@ model User {
 
   @@index([status])
   @@index([role])
+  // Trigram GIN indexes accelerate the ILIKE substring filters used by search.
+  @@index([username(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@index([firstName(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@index([lastName(ops: raw("gin_trgm_ops"))], type: Gin)
   @@map("User")
 }
 
@@ -176,6 +180,7 @@ model DishList {
 
   @@index([moderationState])
   @@index([ownerId])
+  @@index([title(ops: raw("gin_trgm_ops"))], type: Gin)
   @@map("DishList")
 }
 
@@ -212,6 +217,8 @@ model Recipe {
 
   @@unique([creatorId, originalRecipeId])
   @@index([moderationState])
+  @@index([title(ops: raw("gin_trgm_ops"))], type: Gin)
+  @@index([description(ops: raw("gin_trgm_ops"))], type: Gin)
   @@map("Recipe")
 }
 

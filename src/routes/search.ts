@@ -2,498 +2,171 @@ import { Router } from "express";
 import prisma from "../lib/prisma";
 import { authToken, AuthRequest } from "../middleware/auth";
 import { getBlockedPeerIds } from "../lib/blocks";
+import { searchLimiter } from "../middleware/rateLimit";
+import {
+  ScoredUser,
+  ScoredRecipe,
+  ScoredDishList,
+  scoreUser,
+  scoreRecipe,
+  scoreDishList,
+  normalizeSearchQuery,
+  normalizeTab,
+  normalizePageLimit,
+  normalizeCursor,
+  escapeLikePattern,
+  candidatePoolSize,
+  MIN_QUERY_LENGTH,
+} from "../lib/searchScoring";
 
 const router = Router();
 
 // ============================================================================
-// Types
+// DB-side relevance ranking (pg_trgm)
 // ============================================================================
+//
+// These helpers pick WHICH rows enter the in-memory scoring window, ordered by
+// trigram similarity so the most relevant matches are always present (the old
+// `updatedAt`-ordered window could miss the best matches entirely). They return
+// only ids; the caller re-hydrates through Prisma with the full access-control
+// `where`, so Prisma remains the authoritative access gate and a bug here can
+// at worst shorten a page, never leak a private row.
+//
+// Requires the pg_trgm extension + trigram GIN indexes (see prisma/schema.prisma
+// and the accompanying migration). similarity()/ILIKE will error until migrated.
 
-interface ScoredUser {
-  uid: string;
-  username: string | null;
-  firstName: string | null;
-  lastName: string | null;
-  avatarUrl: string | null;
-  isFollowing: boolean;
-  isMutual: boolean;
-  score: number;
-}
-
-interface ScoredRecipe {
-  id: string;
-  title: string;
-  description: string | null;
-  imageUrl: string | null;
-  imageUrls: string[];
-  prepTime: number | null;
-  cookTime: number | null;
-  servings: number | null;
-  tags: string[];
-  creatorId: string;
-  creator: {
-    uid: string;
-    username: string | null;
-    firstName: string | null;
-    lastName: string | null;
-  };
-  score: number;
-}
-
-interface ScoredDishList {
-  id: string;
-  title: string;
-  visibility: string;
-  recipeCount: number;
-  followerCount: number;
-  owner: {
-    uid: string;
-    username: string | null;
-    firstName: string | null;
-    lastName: string | null;
-  };
-  isFollowing: boolean;
-  isCollaborator: boolean;
-  score: number;
-}
-
-// ============================================================================
-// Scoring Functions
-// ============================================================================
-
-/**
- * Calculate base relevance score for text matching
- */
-function calculateTextScore(
+async function rankUserIds(
   query: string,
-  text: string | null,
-  weights: {
-    exact: number;
-    startsWith: number;
-    wordMatch: number;
-    contains: number;
-  }
-): number {
-  if (!text) return 0;
-
-  const normalizedQuery = query.toLowerCase().trim();
-  const normalizedText = text.toLowerCase().trim();
-
-  // Exact match
-  if (normalizedText === normalizedQuery) {
-    return weights.exact;
-  }
-
-  // Starts with query
-  if (normalizedText.startsWith(normalizedQuery)) {
-    return weights.startsWith;
-  }
-
-  // Full word match (query appears as complete word)
-  const wordBoundaryRegex = new RegExp(
-    `\\b${escapeRegex(normalizedQuery)}\\b`,
-    "i"
-  );
-  if (wordBoundaryRegex.test(normalizedText)) {
-    return weights.wordMatch;
-  }
-
-  // Contains query
-  if (normalizedText.includes(normalizedQuery)) {
-    return weights.contains;
-  }
-
-  return 0;
+  excludedIds: string[],
+  pool: number
+): Promise<string[]> {
+  const like = `%${escapeLikePattern(query)}%`;
+  const q = query.toLowerCase();
+  const rows = await prisma.$queryRaw<Array<{ id: string }>>`
+    SELECT uid AS id
+    FROM "User"
+    WHERE uid <> ALL(${excludedIds})
+      AND (
+        username ILIKE ${like}
+        OR "firstName" ILIKE ${like}
+        OR "lastName" ILIKE ${like}
+      )
+    ORDER BY GREATEST(
+      similarity(lower(coalesce(username, '')), ${q}),
+      similarity(lower(concat_ws(' ', "firstName", "lastName")), ${q})
+    ) DESC, uid ASC
+    LIMIT ${pool}
+  `;
+  return rows.map((r) => r.id);
 }
 
-/**
- * Escape special regex characters
- */
-function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+async function rankRecipeIds(
+  query: string,
+  blockedPeerIds: string[],
+  accessibleDishListIds: string[],
+  pool: number
+): Promise<string[]> {
+  const like = `%${escapeLikePattern(query)}%`;
+  const q = query.toLowerCase();
+  const rows = await prisma.$queryRaw<Array<{ id: string }>>`
+    SELECT r.id AS id
+    FROM "Recipe" r
+    WHERE r."creatorId" <> ALL(${blockedPeerIds})
+      AND EXISTS (
+        SELECT 1 FROM "DishListRecipe" dlr
+        WHERE dlr."recipeId" = r.id
+          AND dlr."dishListId" = ANY(${accessibleDishListIds})
+      )
+      AND (
+        r.title ILIKE ${like}
+        OR r.description ILIKE ${like}
+        OR ${query} = ANY(r.tags)
+        OR ${q} = ANY(r.tags)
+      )
+    ORDER BY GREATEST(
+      similarity(lower(r.title), ${q}),
+      similarity(lower(coalesce(r.description, '')), ${q})
+    ) DESC, r.id ASC
+    LIMIT ${pool}
+  `;
+  return rows.map((r) => r.id);
+}
+
+async function rankDishListIds(
+  query: string,
+  accessibleDishListIds: string[],
+  pool: number
+): Promise<string[]> {
+  const like = `%${escapeLikePattern(query)}%`;
+  const q = query.toLowerCase();
+  const rows = await prisma.$queryRaw<Array<{ id: string }>>`
+    SELECT d.id AS id
+    FROM "DishList" d
+    WHERE d.id = ANY(${accessibleDishListIds})
+      AND (
+        d.title ILIKE ${like}
+        OR EXISTS (
+          SELECT 1 FROM "User" u
+          WHERE u.uid = d."ownerId"
+            AND (
+              u.username ILIKE ${like}
+              OR u."firstName" ILIKE ${like}
+              OR u."lastName" ILIKE ${like}
+            )
+        )
+        OR EXISTS (
+          SELECT 1 FROM "DishListRecipe" dlr
+          JOIN "Recipe" rr ON rr.id = dlr."recipeId"
+          WHERE dlr."dishListId" = d.id AND rr.title ILIKE ${like}
+        )
+      )
+    ORDER BY similarity(lower(d.title), ${q}) DESC, d.id ASC
+    LIMIT ${pool}
+  `;
+  return rows.map((r) => r.id);
 }
 
 /**
- * Calculate popularity boost (logarithmic, capped)
+ * Apply cursor pagination over an already-scored+sorted list. When the cursor
+ * is not found in the current window (e.g. it belongs past the fetched
+ * candidate window), return [] to signal end-of-list rather than falling back
+ * to the first page, which would duplicate results and loop load-more forever.
  */
-function calculatePopularityBoost(count: number, maxBoost: number): number {
-  if (count <= 0) return 0;
-  return Math.min(maxBoost, Math.log10(count + 1) * 3);
-}
-
-/**
- * Calculate recency boost (within last 30 days)
- */
-function calculateRecencyBoost(updatedAt: Date, maxBoost: number): number {
-  const daysSinceUpdate =
-    (Date.now() - updatedAt.getTime()) / (1000 * 60 * 60 * 24);
-  if (daysSinceUpdate > 30) return 0;
-  return maxBoost * (1 - daysSinceUpdate / 30);
-}
-
-// ============================================================================
-// User Scoring (for USERS tab and ALL tab)
-// ============================================================================
-
-function scoreUser(
-  user: any,
-  query: string,
-  currentUserId: string,
-  followingIds: Set<string>,
-  followerIds: Set<string>,
-  isAllTab: boolean
-): ScoredUser {
-  let score = 0;
-
-  const displayName = [user.firstName, user.lastName].filter(Boolean).join(" ");
-
-  // Name/username matching
-  score += calculateTextScore(query, displayName, {
-    exact: 100,
-    startsWith: 90,
-    wordMatch: 80,
-    contains: 60,
-  });
-
-  score += calculateTextScore(query, user.username, {
-    exact: 100,
-    startsWith: 70,
-    wordMatch: 65,
-    contains: 50,
-  });
-
-  // Social boosts
-  const isFollowing = followingIds.has(user.uid);
-  const isMutual = isFollowing && followerIds.has(user.uid);
-
-  if (isAllTab) {
-    // Social boosts only apply on ALL tab with base relevance >= 50
-    if (score >= 50) {
-      if (isMutual) {
-        score += 20;
-      } else if (isFollowing) {
-        score += 15;
-      }
+function paginateScored<T>(
+  scored: T[],
+  limit: number,
+  getId: (item: T) => string,
+  cursor?: string
+): T[] {
+  if (cursor) {
+    const cursorIndex = scored.findIndex((item) => getId(item) === cursor);
+    if (cursorIndex === -1) {
+      return [];
     }
-  } else {
-    // USERS tab: stronger social boosts, always rank followed above non-followed
-    if (isMutual) {
-      score += 40;
-    } else if (isFollowing) {
-      score += 30;
-    }
+    return scored.slice(cursorIndex + 1, cursorIndex + 1 + limit);
   }
 
-  return {
-    uid: user.uid,
-    username: user.username,
-    firstName: user.firstName,
-    lastName: user.lastName,
-    avatarUrl: user.avatarUrl,
-    isFollowing,
-    isMutual,
-    score,
-  };
-}
-
-// ============================================================================
-// Recipe Scoring (for RECIPES tab and ALL tab)
-// ============================================================================
-
-function scoreRecipe(
-  recipe: any,
-  query: string,
-  currentUserId: string,
-  followingIds: Set<string>,
-  savedRecipeIds: Set<string>,
-  isAllTab: boolean
-): ScoredRecipe {
-  let score = 0;
-
-  // Title matching (primary signal)
-  score += calculateTextScore(query, recipe.title, {
-    exact: 100,
-    startsWith: 90,
-    wordMatch: 80,
-    contains: 60,
-  });
-
-  // Tag matching
-  if (recipe.tags && Array.isArray(recipe.tags)) {
-    for (const tag of recipe.tags) {
-      const tagScore = calculateTextScore(query, tag, {
-        exact: 50,
-        startsWith: 40,
-        wordMatch: 35,
-        contains: 25,
-      });
-      if (tagScore > 0) {
-        score += tagScore;
-        break; // Only count best tag match
-      }
-    }
-  }
-
-  // Ingredient matching
-  if (recipe.ingredients && Array.isArray(recipe.ingredients)) {
-    for (let i = 0; i < recipe.ingredients.length; i++) {
-      const ingredient = recipe.ingredients[i];
-      const ingredientText =
-        typeof ingredient === "string" ? ingredient : ingredient?.text;
-      if (ingredientText) {
-        const isTopIngredient = i < 3;
-        const ingredientScore = calculateTextScore(query, ingredientText, {
-          exact: isTopIngredient ? 45 : 25,
-          startsWith: isTopIngredient ? 40 : 20,
-          wordMatch: isTopIngredient ? 35 : 18,
-          contains: isTopIngredient ? 25 : 12,
-        });
-        if (ingredientScore > 0) {
-          score += ingredientScore;
-          break; // Only count best ingredient match
-        }
-      }
-    }
-  }
-
-  // Description matching (secondary)
-  score += calculateTextScore(query, recipe.description, {
-    exact: 25,
-    startsWith: 20,
-    wordMatch: 18,
-    contains: 15,
-  });
-
-  // Author matching (light weight on RECIPES tab)
-  const creatorName = [recipe.creator?.firstName, recipe.creator?.lastName]
-    .filter(Boolean)
-    .join(" ");
-  score += calculateTextScore(query, creatorName, {
-    exact: 20,
-    startsWith: 15,
-    wordMatch: 12,
-    contains: 8,
-  });
-
-  // Social boosts (only on ALL tab, capped at +10)
-  if (isAllTab && score >= 50) {
-    let socialBoost = 0;
-
-    if (savedRecipeIds.has(recipe.id)) {
-      socialBoost += 10;
-    }
-    if (followingIds.has(recipe.creatorId)) {
-      socialBoost += 6;
-    }
-
-    score += Math.min(10, socialBoost);
-  } else if (!isAllTab) {
-    // RECIPES tab: lighter social signals
-    if (savedRecipeIds.has(recipe.id)) {
-      score += 15;
-    }
-    if (followingIds.has(recipe.creatorId)) {
-      score += 10;
-    }
-  }
-
-  // Recency boost (tie-breaker, capped at +5)
-  score += calculateRecencyBoost(recipe.updatedAt, 5);
-
-  return {
-    id: recipe.id,
-    title: recipe.title,
-    description: recipe.description,
-    imageUrl: recipe.imageUrl,
-    imageUrls: (recipe as any).imageUrls?.length
-      ? (recipe as any).imageUrls
-      : recipe.imageUrl
-        ? [recipe.imageUrl]
-        : [],
-    prepTime: recipe.prepTime,
-    cookTime: recipe.cookTime,
-    servings: recipe.servings,
-    tags: recipe.tags || [],
-    creatorId: recipe.creatorId,
-    creator: recipe.creator,
-    score,
-  };
-}
-
-// ============================================================================
-// DishList Scoring (for DISHLISTS tab and ALL tab)
-// ============================================================================
-
-function scoreDishList(
-  dishList: any,
-  query: string,
-  currentUserId: string,
-  followingIds: Set<string>,
-  followedDishListIds: Set<string>,
-  isAllTab: boolean
-): ScoredDishList {
-  let score = 0;
-
-  // Title matching (primary signal)
-  score += calculateTextScore(query, dishList.title, {
-    exact: 100,
-    startsWith: 90,
-    wordMatch: 80,
-    contains: 60,
-  });
-
-  // Creator matching
-  const ownerName = [dishList.owner?.firstName, dishList.owner?.lastName]
-    .filter(Boolean)
-    .join(" ");
-  score += calculateTextScore(query, ownerName, {
-    exact: 60,
-    startsWith: 50,
-    wordMatch: 45,
-    contains: 35,
-  });
-
-  score += calculateTextScore(query, dishList.owner?.username, {
-    exact: 55,
-    startsWith: 45,
-    wordMatch: 40,
-    contains: 30,
-  });
-
-  // Collaborator matching
-  if (dishList.collaborators && Array.isArray(dishList.collaborators)) {
-    for (const collab of dishList.collaborators) {
-      const collabName = [collab.user?.firstName, collab.user?.lastName]
-        .filter(Boolean)
-        .join(" ");
-      const collabScore = calculateTextScore(query, collabName, {
-        exact: 35,
-        startsWith: 30,
-        wordMatch: 25,
-        contains: 20,
-      });
-      if (collabScore > 0) {
-        score += collabScore;
-        break;
-      }
-    }
-  }
-
-  // Recipe titles inside DishList (secondary)
-  if (dishList.recipes && Array.isArray(dishList.recipes)) {
-    for (const dlRecipe of dishList.recipes) {
-      const recipeTitle = dlRecipe.recipe?.title;
-      const recipeScore = calculateTextScore(query, recipeTitle, {
-        exact: 35,
-        startsWith: 30,
-        wordMatch: 25,
-        contains: 18,
-      });
-      if (recipeScore > 0) {
-        score += recipeScore;
-        break; // Only count best recipe title match
-      }
-    }
-  }
-
-  // Recipe ingredients inside DishList (secondary)
-  if (dishList.recipes && Array.isArray(dishList.recipes)) {
-    let foundIngredientMatch = false;
-    for (const dlRecipe of dishList.recipes) {
-      const ingredients = dlRecipe.recipe?.ingredients;
-      if (ingredients && Array.isArray(ingredients)) {
-        for (const ingredient of ingredients) {
-          const ingredientText =
-            typeof ingredient === "string" ? ingredient : ingredient?.text;
-          if (ingredientText) {
-            const ingredientScore = calculateTextScore(query, ingredientText, {
-              exact: 30,
-              startsWith: 25,
-              wordMatch: 20,
-              contains: 15,
-            });
-            if (ingredientScore > 0) {
-              score += ingredientScore;
-              foundIngredientMatch = true;
-              break; // Only count best ingredient match per recipe
-            }
-          }
-        }
-        if (foundIngredientMatch) break; // Only count one recipe's ingredient match
-      }
-    }
-  }
-
-  const isFollowing = followedDishListIds.has(dishList.id);
-  const isCollaborator = dishList.collaborators?.some(
-    (c: any) => c.userId === currentUserId
-  );
-
-  // Social boosts
-  if (isAllTab && score >= 50) {
-    let socialBoost = 0;
-
-    if (isFollowing) {
-      socialBoost += 10;
-    }
-    if (followingIds.has(dishList.ownerId)) {
-      socialBoost += 8;
-    }
-
-    score += Math.min(10, socialBoost);
-  } else if (!isAllTab) {
-    // DISHLISTS tab
-    if (isFollowing) {
-      score += 20;
-    }
-  }
-
-  // Popularity boost (follower count, logarithmic, capped at +15)
-  const followerCount = dishList._count?.followers || 0;
-  if (score >= 50 || !isAllTab) {
-    score += calculatePopularityBoost(followerCount, 15);
-  }
-
-  // Recency boost
-  score += calculateRecencyBoost(dishList.updatedAt, 5);
-
-  return {
-    id: dishList.id,
-    title: dishList.title,
-    visibility: dishList.visibility,
-    recipeCount: dishList._count?.recipes || 0,
-    followerCount,
-    owner: dishList.owner,
-    isFollowing,
-    isCollaborator: isCollaborator || false,
-    score,
-  };
+  return scored.slice(0, limit);
 }
 
 // ============================================================================
 // Main Search Endpoint
 // ============================================================================
 
-router.get("/", authToken, async (req: AuthRequest, res) => {
+router.get("/", authToken, searchLimiter, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.uid;
-    const {
-      q = "",
-      tab = "all",
-      cursor,
-      limit = "20",
-    } = req.query as {
-      q?: string;
-      tab?: "all" | "users" | "recipes" | "dishlists";
-      cursor?: string;
-      limit?: string;
-    };
 
-    const query = (q as string).trim();
-    const pageLimit = Math.min(parseInt(limit as string) || 20, 50);
+    // Normalize request params: coerce array-valued params, cap query length,
+    // clamp the page limit, and fall back to the "all" tab for unknown values.
+    const query = normalizeSearchQuery(req.query.q);
+    const tab = normalizeTab(req.query.tab);
+    const cursor = normalizeCursor(req.query.cursor);
+    const pageLimit = normalizePageLimit(req.query.limit);
 
-    // If no query, return empty results
-    if (!query) {
+    // Below the minimum length the filtered tabs would scan near-everything and
+    // return window-limited noise, so return empty (client shows a hint).
+    if (query.length < MIN_QUERY_LENGTH) {
       return res.json({
         users: [],
         recipes: [],
@@ -538,6 +211,26 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
     });
     const savedRecipeIds = new Set(userDishListRecipes.map((r) => r.recipeId));
 
+    // The set of DishLists the caller may see. Computed once via Prisma (the
+    // authoritative access filter) and reused for both recipe and DishList
+    // ranking/hydration. Following never grants access to a private DishList.
+    const accessibleDishLists = await prisma.dishList.findMany({
+      where: {
+        AND: [
+          {
+            OR: [
+              { visibility: "PUBLIC" },
+              { ownerId: userId },
+              { collaborators: { some: { userId } } },
+            ],
+          },
+          { ownerId: { notIn: blockedPeerIds } },
+        ],
+      },
+      select: { id: true },
+    });
+    const accessibleDishListIds = accessibleDishLists.map((d) => d.id);
+
     // Build response based on tab
     if (tab === "all") {
       // ALL tab: fetch limited results from each category
@@ -548,8 +241,8 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
           userId,
           followingIds,
           savedRecipeIds,
-          followedDishListIds,
           blockedPeerIds,
+          accessibleDishListIds,
           true,
           10
         ),
@@ -559,6 +252,7 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
           followingIds,
           followedDishListIds,
           blockedPeerIds,
+          accessibleDishListIds,
           true,
           10
         ),
@@ -617,8 +311,8 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
         userId,
         followingIds,
         savedRecipeIds,
-        followedDishListIds,
         blockedPeerIds,
+        accessibleDishListIds,
         false,
         pageLimit + 1,
         cursor
@@ -643,6 +337,7 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
         followingIds,
         followedDishListIds,
         blockedPeerIds,
+        accessibleDishListIds,
         false,
         pageLimit + 1,
         cursor
@@ -687,17 +382,19 @@ async function searchUsers(
   cursor?: string
 ): Promise<ScoredUser[]> {
   const minScore = isAllTab ? 30 : 40;
+  const excludedIds = [currentUserId, ...blockedPeerIds];
 
-  // Search users by name or username
+  // Relevance-ranked candidate window (ids only, access-scoped in SQL).
+  const rankedIds = await rankUserIds(
+    query,
+    excludedIds,
+    candidatePoolSize(limit)
+  );
+  if (rankedIds.length === 0) return [];
+
+  // Hydrate through Prisma (authoritative access gate; excludedIds re-applied).
   const users = await prisma.user.findMany({
-    where: {
-      uid: { notIn: [currentUserId, ...blockedPeerIds] },
-      OR: [
-        { username: { contains: query, mode: "insensitive" } },
-        { firstName: { contains: query, mode: "insensitive" } },
-        { lastName: { contains: query, mode: "insensitive" } },
-      ],
-    },
+    where: { uid: { in: rankedIds, notIn: excludedIds } },
     select: {
       uid: true,
       username: true,
@@ -705,7 +402,6 @@ async function searchUsers(
       lastName: true,
       avatarUrl: true,
     },
-    take: limit * 3, // Fetch more to account for filtering after scoring
   });
 
   // Score and filter
@@ -725,15 +421,7 @@ async function searchUsers(
       return (a.username || "").localeCompare(b.username || "");
     });
 
-  // Apply cursor-based pagination
-  if (cursor) {
-    const cursorIndex = scored.findIndex((u) => u.uid === cursor);
-    if (cursorIndex !== -1) {
-      return scored.slice(cursorIndex + 1, cursorIndex + 1 + limit);
-    }
-  }
-
-  return scored.slice(0, limit);
+  return paginateScored(scored, limit, (u) => u.uid, cursor);
 }
 
 async function searchRecipes(
@@ -741,47 +429,33 @@ async function searchRecipes(
   currentUserId: string,
   followingIds: Set<string>,
   savedRecipeIds: Set<string>,
-  followedDishListIds: Set<string>,
   blockedPeerIds: string[],
+  accessibleDishListIds: string[],
   isAllTab: boolean,
   limit: number,
   cursor?: string
 ): Promise<ScoredRecipe[]> {
   const minScore = 30;
 
-  // Following never grants access to a private DishList. A stale follower row
-  // must not make the list or its recipes searchable.
-  const accessibleDishLists = await prisma.dishList.findMany({
-    where: {
-      AND: [
-        {
-          OR: [
-            { visibility: "PUBLIC" },
-            { ownerId: currentUserId },
-            { collaborators: { some: { userId: currentUserId } } },
-          ],
-        },
-        { ownerId: { notIn: blockedPeerIds } },
-      ],
-    },
-    select: { id: true },
-  });
-  const accessibleDishListIds = new Set(accessibleDishLists.map((d) => d.id));
+  // Relevance-ranked candidate window (ids only, access-scoped in SQL).
+  const rankedIds = await rankRecipeIds(
+    query,
+    blockedPeerIds,
+    accessibleDishListIds,
+    candidatePoolSize(limit)
+  );
+  if (rankedIds.length === 0) return [];
 
-  // Search recipes
+  // Hydrate through Prisma. The access-control `where` is re-applied here so
+  // Prisma stays authoritative: a stale follower row must not make the list or
+  // its recipes searchable.
   const recipes = await prisma.recipe.findMany({
     where: {
-      OR: [
-        { title: { contains: query, mode: "insensitive" } },
-        { description: { contains: query, mode: "insensitive" } },
-        { tags: { has: query } }, // Exact tag match
-        { tags: { hasSome: [query.toLowerCase()] } },
-      ],
+      id: { in: rankedIds },
       creatorId: { notIn: blockedPeerIds },
-      // Must be in an accessible DishList
       dishLists: {
         some: {
-          dishListId: { in: Array.from(accessibleDishListIds) },
+          dishListId: { in: accessibleDishListIds },
         },
       },
     },
@@ -795,7 +469,6 @@ async function searchRecipes(
         },
       },
     },
-    take: limit * 3,
   });
 
   // Score and filter
@@ -816,15 +489,7 @@ async function searchRecipes(
       return a.id.localeCompare(b.id); // Stable sort
     });
 
-  // Apply cursor-based pagination
-  if (cursor) {
-    const cursorIndex = scored.findIndex((r) => r.id === cursor);
-    if (cursorIndex !== -1) {
-      return scored.slice(cursorIndex + 1, cursorIndex + 1 + limit);
-    }
-  }
-
-  return scored.slice(0, limit);
+  return paginateScored(scored, limit, (r) => r.id, cursor);
 }
 
 async function searchDishLists(
@@ -833,17 +498,27 @@ async function searchDishLists(
   followingIds: Set<string>,
   followedDishListIds: Set<string>,
   blockedPeerIds: string[],
+  accessibleDishListIds: string[],
   isAllTab: boolean,
   limit: number,
   cursor?: string
 ): Promise<ScoredDishList[]> {
   const minScore = isAllTab ? 30 : 35;
 
-  // Search DishLists (only public OR ones user has access to)
+  // Relevance-ranked candidate window (ids only, access-scoped in SQL).
+  const rankedIds = await rankDishListIds(
+    query,
+    accessibleDishListIds,
+    candidatePoolSize(limit)
+  );
+  if (rankedIds.length === 0) return [];
+
+  // Hydrate through Prisma. rankedIds are already access-scoped; the ACL is
+  // re-applied here as defense-in-depth so Prisma stays authoritative.
   const dishLists = await prisma.dishList.findMany({
     where: {
       AND: [
-        // Access control
+        { id: { in: rankedIds } },
         {
           OR: [
             { visibility: "PUBLIC" },
@@ -852,30 +527,6 @@ async function searchDishLists(
           ],
         },
         { ownerId: { notIn: blockedPeerIds } },
-        // Search criteria
-        {
-          OR: [
-            { title: { contains: query, mode: "insensitive" } },
-            {
-              owner: {
-                OR: [
-                  { username: { contains: query, mode: "insensitive" } },
-                  { firstName: { contains: query, mode: "insensitive" } },
-                  { lastName: { contains: query, mode: "insensitive" } },
-                ],
-              },
-            },
-            {
-              recipes: {
-                some: {
-                  recipe: {
-                    title: { contains: query, mode: "insensitive" },
-                  },
-                },
-              },
-            },
-          ],
-        },
       ],
     },
     include: {
@@ -916,7 +567,6 @@ async function searchDishLists(
         },
       },
     },
-    take: limit * 3,
   });
 
   // Score and filter
@@ -937,15 +587,7 @@ async function searchDishLists(
       return a.id.localeCompare(b.id); // Stable sort
     });
 
-  // Apply cursor-based pagination
-  if (cursor) {
-    const cursorIndex = scored.findIndex((d) => d.id === cursor);
-    if (cursorIndex !== -1) {
-      return scored.slice(cursorIndex + 1, cursorIndex + 1 + limit);
-    }
-  }
-
-  return scored.slice(0, limit);
+  return paginateScored(scored, limit, (d) => d.id, cursor);
 }
 
 export default router;
