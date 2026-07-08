@@ -15,6 +15,27 @@ export const VALID_TABS: readonly SearchTab[] = [
 export const MAX_QUERY_LENGTH = 100;
 export const DEFAULT_PAGE_LIMIT = 20;
 export const MAX_PAGE_LIMIT = 50;
+// Below this, the filtered tabs run a near-full scan and return low-quality,
+// window-limited noise, so we don't search at all (client shows a hint).
+export const MIN_QUERY_LENGTH = 2;
+
+/**
+ * Escape LIKE/ILIKE wildcards so user input is matched literally (the default
+ * Postgres escape char is backslash). Prevents `%`/`_` in a query from
+ * silently broadening the match.
+ */
+export function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
+/**
+ * How many relevance-ranked rows to pull into the in-memory scoring window.
+ * Wide enough that the best matches for a page are always present, capped so a
+ * single search can't fan out unbounded work.
+ */
+export function candidatePoolSize(limit: number): number {
+  return Math.min(300, Math.max(limit * 4, 120));
+}
 
 // ============================================================================
 // Request param normalization

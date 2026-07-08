@@ -11,6 +11,8 @@ import {
   scoreUser,
   scoreRecipe,
   scoreDishList,
+  escapeLikePattern,
+  candidatePoolSize,
   MAX_QUERY_LENGTH,
   DEFAULT_PAGE_LIMIT,
   MAX_PAGE_LIMIT,
@@ -86,6 +88,31 @@ describe("normalizeCursor", () => {
   it("returns undefined for empty/missing", () => {
     expect(normalizeCursor("")).toBeUndefined();
     expect(normalizeCursor(undefined)).toBeUndefined();
+  });
+});
+
+describe("escapeLikePattern", () => {
+  it("escapes LIKE wildcards and the escape char", () => {
+    expect(escapeLikePattern("50%_off")).toBe("50\\%\\_off");
+    expect(escapeLikePattern("back\\slash")).toBe("back\\\\slash");
+  });
+
+  it("leaves ordinary text untouched", () => {
+    expect(escapeLikePattern("chicken")).toBe("chicken");
+  });
+});
+
+describe("candidatePoolSize", () => {
+  it("has a floor of 120", () => {
+    expect(candidatePoolSize(10)).toBe(120);
+  });
+
+  it("scales with the page limit", () => {
+    expect(candidatePoolSize(51)).toBe(204);
+  });
+
+  it("is capped at 300", () => {
+    expect(candidatePoolSize(100)).toBe(300);
   });
 });
 

@@ -14,9 +14,140 @@ import {
   normalizeTab,
   normalizePageLimit,
   normalizeCursor,
+  escapeLikePattern,
+  candidatePoolSize,
+  MIN_QUERY_LENGTH,
 } from "../lib/searchScoring";
 
 const router = Router();
+
+// ============================================================================
+// DB-side relevance ranking (pg_trgm)
+// ============================================================================
+//
+// These helpers pick WHICH rows enter the in-memory scoring window, ordered by
+// trigram similarity so the most relevant matches are always present (the old
+// `updatedAt`-ordered window could miss the best matches entirely). They return
+// only ids; the caller re-hydrates through Prisma with the full access-control
+// `where`, so Prisma remains the authoritative access gate and a bug here can
+// at worst shorten a page, never leak a private row.
+//
+// Requires the pg_trgm extension + trigram GIN indexes (see prisma/schema.prisma
+// and the accompanying migration). similarity()/ILIKE will error until migrated.
+
+async function rankUserIds(
+  query: string,
+  excludedIds: string[],
+  pool: number
+): Promise<string[]> {
+  const like = `%${escapeLikePattern(query)}%`;
+  const q = query.toLowerCase();
+  const rows = await prisma.$queryRaw<Array<{ id: string }>>`
+    SELECT uid AS id
+    FROM "User"
+    WHERE uid <> ALL(${excludedIds})
+      AND (
+        username ILIKE ${like}
+        OR "firstName" ILIKE ${like}
+        OR "lastName" ILIKE ${like}
+      )
+    ORDER BY GREATEST(
+      similarity(lower(coalesce(username, '')), ${q}),
+      similarity(lower(concat_ws(' ', "firstName", "lastName")), ${q})
+    ) DESC, uid ASC
+    LIMIT ${pool}
+  `;
+  return rows.map((r) => r.id);
+}
+
+async function rankRecipeIds(
+  query: string,
+  blockedPeerIds: string[],
+  accessibleDishListIds: string[],
+  pool: number
+): Promise<string[]> {
+  const like = `%${escapeLikePattern(query)}%`;
+  const q = query.toLowerCase();
+  const rows = await prisma.$queryRaw<Array<{ id: string }>>`
+    SELECT r.id AS id
+    FROM "Recipe" r
+    WHERE r."creatorId" <> ALL(${blockedPeerIds})
+      AND EXISTS (
+        SELECT 1 FROM "DishListRecipe" dlr
+        WHERE dlr."recipeId" = r.id
+          AND dlr."dishListId" = ANY(${accessibleDishListIds})
+      )
+      AND (
+        r.title ILIKE ${like}
+        OR r.description ILIKE ${like}
+        OR ${query} = ANY(r.tags)
+        OR ${q} = ANY(r.tags)
+      )
+    ORDER BY GREATEST(
+      similarity(lower(r.title), ${q}),
+      similarity(lower(coalesce(r.description, '')), ${q})
+    ) DESC, r.id ASC
+    LIMIT ${pool}
+  `;
+  return rows.map((r) => r.id);
+}
+
+async function rankDishListIds(
+  query: string,
+  accessibleDishListIds: string[],
+  pool: number
+): Promise<string[]> {
+  const like = `%${escapeLikePattern(query)}%`;
+  const q = query.toLowerCase();
+  const rows = await prisma.$queryRaw<Array<{ id: string }>>`
+    SELECT d.id AS id
+    FROM "DishList" d
+    WHERE d.id = ANY(${accessibleDishListIds})
+      AND (
+        d.title ILIKE ${like}
+        OR EXISTS (
+          SELECT 1 FROM "User" u
+          WHERE u.uid = d."ownerId"
+            AND (
+              u.username ILIKE ${like}
+              OR u."firstName" ILIKE ${like}
+              OR u."lastName" ILIKE ${like}
+            )
+        )
+        OR EXISTS (
+          SELECT 1 FROM "DishListRecipe" dlr
+          JOIN "Recipe" rr ON rr.id = dlr."recipeId"
+          WHERE dlr."dishListId" = d.id AND rr.title ILIKE ${like}
+        )
+      )
+    ORDER BY similarity(lower(d.title), ${q}) DESC, d.id ASC
+    LIMIT ${pool}
+  `;
+  return rows.map((r) => r.id);
+}
+
+/**
+ * Apply cursor pagination over an already-scored+sorted list. When the cursor
+ * is not found in the current window (e.g. it belongs past the fetched
+ * candidate window), return [] to signal end-of-list rather than falling back
+ * to the first page, which would duplicate results and loop load-more forever.
+ */
+function paginateScored<T>(
+  scored: T[],
+  limit: number,
+  getId: (item: T) => string,
+  cursor?: string
+): T[] {
+  if (cursor) {
+    const cursorIndex = scored.findIndex((item) => getId(item) === cursor);
+    if (cursorIndex === -1) {
+      return [];
+    }
+    return scored.slice(cursorIndex + 1, cursorIndex + 1 + limit);
+  }
+
+  return scored.slice(0, limit);
+}
 
 // ============================================================================
 // Main Search Endpoint
@@ -33,8 +164,9 @@ router.get("/", authToken, searchLimiter, async (req: AuthRequest, res) => {
     const cursor = normalizeCursor(req.query.cursor);
     const pageLimit = normalizePageLimit(req.query.limit);
 
-    // If no query, return empty results
-    if (!query) {
+    // Below the minimum length the filtered tabs would scan near-everything and
+    // return window-limited noise, so return empty (client shows a hint).
+    if (query.length < MIN_QUERY_LENGTH) {
       return res.json({
         users: [],
         recipes: [],
@@ -79,6 +211,26 @@ router.get("/", authToken, searchLimiter, async (req: AuthRequest, res) => {
     });
     const savedRecipeIds = new Set(userDishListRecipes.map((r) => r.recipeId));
 
+    // The set of DishLists the caller may see. Computed once via Prisma (the
+    // authoritative access filter) and reused for both recipe and DishList
+    // ranking/hydration. Following never grants access to a private DishList.
+    const accessibleDishLists = await prisma.dishList.findMany({
+      where: {
+        AND: [
+          {
+            OR: [
+              { visibility: "PUBLIC" },
+              { ownerId: userId },
+              { collaborators: { some: { userId } } },
+            ],
+          },
+          { ownerId: { notIn: blockedPeerIds } },
+        ],
+      },
+      select: { id: true },
+    });
+    const accessibleDishListIds = accessibleDishLists.map((d) => d.id);
+
     // Build response based on tab
     if (tab === "all") {
       // ALL tab: fetch limited results from each category
@@ -89,8 +241,8 @@ router.get("/", authToken, searchLimiter, async (req: AuthRequest, res) => {
           userId,
           followingIds,
           savedRecipeIds,
-          followedDishListIds,
           blockedPeerIds,
+          accessibleDishListIds,
           true,
           10
         ),
@@ -100,6 +252,7 @@ router.get("/", authToken, searchLimiter, async (req: AuthRequest, res) => {
           followingIds,
           followedDishListIds,
           blockedPeerIds,
+          accessibleDishListIds,
           true,
           10
         ),
@@ -158,8 +311,8 @@ router.get("/", authToken, searchLimiter, async (req: AuthRequest, res) => {
         userId,
         followingIds,
         savedRecipeIds,
-        followedDishListIds,
         blockedPeerIds,
+        accessibleDishListIds,
         false,
         pageLimit + 1,
         cursor
@@ -184,6 +337,7 @@ router.get("/", authToken, searchLimiter, async (req: AuthRequest, res) => {
         followingIds,
         followedDishListIds,
         blockedPeerIds,
+        accessibleDishListIds,
         false,
         pageLimit + 1,
         cursor
@@ -217,29 +371,6 @@ router.get("/", authToken, searchLimiter, async (req: AuthRequest, res) => {
 // Search Helper Functions
 // ============================================================================
 
-/**
- * Apply cursor pagination over an already-scored+sorted list. When the cursor
- * is not found in the current window (e.g. it belongs past the fetched
- * `take` window), return [] to signal end-of-list rather than falling back to
- * the first page, which would duplicate results and loop load-more forever.
- */
-function paginateScored<T>(
-  scored: T[],
-  limit: number,
-  getId: (item: T) => string,
-  cursor?: string
-): T[] {
-  if (cursor) {
-    const cursorIndex = scored.findIndex((item) => getId(item) === cursor);
-    if (cursorIndex === -1) {
-      return [];
-    }
-    return scored.slice(cursorIndex + 1, cursorIndex + 1 + limit);
-  }
-
-  return scored.slice(0, limit);
-}
-
 async function searchUsers(
   query: string,
   currentUserId: string,
@@ -251,17 +382,19 @@ async function searchUsers(
   cursor?: string
 ): Promise<ScoredUser[]> {
   const minScore = isAllTab ? 30 : 40;
+  const excludedIds = [currentUserId, ...blockedPeerIds];
 
-  // Search users by name or username
+  // Relevance-ranked candidate window (ids only, access-scoped in SQL).
+  const rankedIds = await rankUserIds(
+    query,
+    excludedIds,
+    candidatePoolSize(limit)
+  );
+  if (rankedIds.length === 0) return [];
+
+  // Hydrate through Prisma (authoritative access gate; excludedIds re-applied).
   const users = await prisma.user.findMany({
-    where: {
-      uid: { notIn: [currentUserId, ...blockedPeerIds] },
-      OR: [
-        { username: { contains: query, mode: "insensitive" } },
-        { firstName: { contains: query, mode: "insensitive" } },
-        { lastName: { contains: query, mode: "insensitive" } },
-      ],
-    },
+    where: { uid: { in: rankedIds, notIn: excludedIds } },
     select: {
       uid: true,
       username: true,
@@ -269,10 +402,6 @@ async function searchUsers(
       lastName: true,
       avatarUrl: true,
     },
-    // Stable ordering so the fetched window and cross-page results are
-    // deterministic (in-memory scoring re-runs this fetch on every page).
-    orderBy: [{ username: "asc" }, { uid: "asc" }],
-    take: limit * 3, // Fetch more to account for filtering after scoring
   });
 
   // Score and filter
@@ -300,47 +429,33 @@ async function searchRecipes(
   currentUserId: string,
   followingIds: Set<string>,
   savedRecipeIds: Set<string>,
-  followedDishListIds: Set<string>,
   blockedPeerIds: string[],
+  accessibleDishListIds: string[],
   isAllTab: boolean,
   limit: number,
   cursor?: string
 ): Promise<ScoredRecipe[]> {
   const minScore = 30;
 
-  // Following never grants access to a private DishList. A stale follower row
-  // must not make the list or its recipes searchable.
-  const accessibleDishLists = await prisma.dishList.findMany({
-    where: {
-      AND: [
-        {
-          OR: [
-            { visibility: "PUBLIC" },
-            { ownerId: currentUserId },
-            { collaborators: { some: { userId: currentUserId } } },
-          ],
-        },
-        { ownerId: { notIn: blockedPeerIds } },
-      ],
-    },
-    select: { id: true },
-  });
-  const accessibleDishListIds = new Set(accessibleDishLists.map((d) => d.id));
+  // Relevance-ranked candidate window (ids only, access-scoped in SQL).
+  const rankedIds = await rankRecipeIds(
+    query,
+    blockedPeerIds,
+    accessibleDishListIds,
+    candidatePoolSize(limit)
+  );
+  if (rankedIds.length === 0) return [];
 
-  // Search recipes
+  // Hydrate through Prisma. The access-control `where` is re-applied here so
+  // Prisma stays authoritative: a stale follower row must not make the list or
+  // its recipes searchable.
   const recipes = await prisma.recipe.findMany({
     where: {
-      OR: [
-        { title: { contains: query, mode: "insensitive" } },
-        { description: { contains: query, mode: "insensitive" } },
-        { tags: { has: query } }, // Exact tag match
-        { tags: { hasSome: [query.toLowerCase()] } },
-      ],
+      id: { in: rankedIds },
       creatorId: { notIn: blockedPeerIds },
-      // Must be in an accessible DishList
       dishLists: {
         some: {
-          dishListId: { in: Array.from(accessibleDishListIds) },
+          dishListId: { in: accessibleDishListIds },
         },
       },
     },
@@ -354,10 +469,6 @@ async function searchRecipes(
         },
       },
     },
-    // Stable ordering so the fetched window and cross-page results are
-    // deterministic (in-memory scoring re-runs this fetch on every page).
-    orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
-    take: limit * 3,
   });
 
   // Score and filter
@@ -387,17 +498,27 @@ async function searchDishLists(
   followingIds: Set<string>,
   followedDishListIds: Set<string>,
   blockedPeerIds: string[],
+  accessibleDishListIds: string[],
   isAllTab: boolean,
   limit: number,
   cursor?: string
 ): Promise<ScoredDishList[]> {
   const minScore = isAllTab ? 30 : 35;
 
-  // Search DishLists (only public OR ones user has access to)
+  // Relevance-ranked candidate window (ids only, access-scoped in SQL).
+  const rankedIds = await rankDishListIds(
+    query,
+    accessibleDishListIds,
+    candidatePoolSize(limit)
+  );
+  if (rankedIds.length === 0) return [];
+
+  // Hydrate through Prisma. rankedIds are already access-scoped; the ACL is
+  // re-applied here as defense-in-depth so Prisma stays authoritative.
   const dishLists = await prisma.dishList.findMany({
     where: {
       AND: [
-        // Access control
+        { id: { in: rankedIds } },
         {
           OR: [
             { visibility: "PUBLIC" },
@@ -406,30 +527,6 @@ async function searchDishLists(
           ],
         },
         { ownerId: { notIn: blockedPeerIds } },
-        // Search criteria
-        {
-          OR: [
-            { title: { contains: query, mode: "insensitive" } },
-            {
-              owner: {
-                OR: [
-                  { username: { contains: query, mode: "insensitive" } },
-                  { firstName: { contains: query, mode: "insensitive" } },
-                  { lastName: { contains: query, mode: "insensitive" } },
-                ],
-              },
-            },
-            {
-              recipes: {
-                some: {
-                  recipe: {
-                    title: { contains: query, mode: "insensitive" },
-                  },
-                },
-              },
-            },
-          ],
-        },
       ],
     },
     include: {
@@ -470,10 +567,6 @@ async function searchDishLists(
         },
       },
     },
-    // Stable ordering so the fetched window and cross-page results are
-    // deterministic (in-memory scoring re-runs this fetch on every page).
-    orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
-    take: limit * 3,
   });
 
   // Score and filter
