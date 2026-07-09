@@ -19,11 +19,21 @@ import {
   validateOptionalEnum,
   validateRequiredText,
 } from "../lib/requestValidation";
+import { parsePageLimit } from "../lib/pagination";
 import { normalizeRecipientIds } from "../lib/inviteValidation";
 import { dishlistShareLimiter } from "../middleware/rateLimit";
 
 const router = Router();
+const DISHLISTS_DEFAULT_PAGE_SIZE = 30;
+const DISHLISTS_MAX_PAGE_SIZE = 100;
 const DISHLIST_TITLE_MIN_LENGTH = 2;
+
+function parsePageOffset(value: unknown): number {
+  if (typeof value !== "string" && typeof value !== "number") return 0;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) return 0;
+  return parsed;
+}
 const DISHLIST_TITLE_MAX_LENGTH = 50;
 const DISHLIST_VISIBILITIES = ["PUBLIC", "PRIVATE"] as const;
 
@@ -66,11 +76,17 @@ function toDishListSummary(list: DishListSummarySource, userId: string) {
   };
 }
 
-// Get user's dishlists with proper filtering
+// Get user's dishlists with proper filtering (offset-paginated)
 router.get("/", authToken, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.uid;
     const { tab = "all" } = req.query;
+    const limit = parsePageLimit(
+      req.query.limit,
+      DISHLISTS_DEFAULT_PAGE_SIZE,
+      DISHLISTS_MAX_PAGE_SIZE,
+    );
+    const offset = parsePageOffset(req.query.offset);
     const blockedPeerIds = await getBlockedPeerIds(userId);
 
     let whereClause: any = {};
@@ -117,49 +133,95 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
       ],
     };
 
-    const dishLists = await prisma.dishList.findMany({
-      where: whereClause,
-      include: {
-        _count: {
-          select: { recipes: true },
-        },
-        owner: {
-          select: {
-            uid: true,
-            username: true,
-            firstName: true,
-            lastName: true,
-          },
-        },
-        collaborators: {
-          where: { userId },
-          select: { userId: true },
-        },
-        followers: {
-          where: { userId },
-          select: { userId: true },
-        },
-        pins: {
-          where: { userId },
-          select: { userId: true },
+    // The response order is default first, then pinned, then the rest by
+    // recency. Offset pagination preserves that by walking two ordered
+    // segments: the "priority" segment (default or pinned by this user)
+    // and then everything else.
+    const priorityWhere = {
+      AND: [
+        whereClause,
+        { OR: [{ isDefault: true }, { pins: { some: { userId } } }] },
+      ],
+    };
+    const restWhere = {
+      AND: [
+        whereClause,
+        { isDefault: false },
+        { pins: { none: { userId } } },
+      ],
+    };
+
+    const listInclude = {
+      _count: {
+        select: { recipes: true },
+      },
+      owner: {
+        select: {
+          uid: true,
+          username: true,
+          firstName: true,
+          lastName: true,
         },
       },
-      orderBy: [{ isDefault: "desc" }, { updatedAt: "desc" }],
+      collaborators: {
+        where: { userId },
+        select: { userId: true },
+      },
+      followers: {
+        where: { userId },
+        select: { userId: true },
+      },
+      pins: {
+        where: { userId },
+        select: { userId: true },
+      },
+    };
+
+    const [priorityCount, restCount] = await Promise.all([
+      prisma.dishList.count({ where: priorityWhere }),
+      prisma.dishList.count({ where: restWhere }),
+    ]);
+    const total = priorityCount + restCount;
+
+    let dishLists: DishListSummarySource[] = [];
+    if (offset < priorityCount) {
+      dishLists = await prisma.dishList.findMany({
+        where: priorityWhere,
+        include: listInclude,
+        orderBy: [{ isDefault: "desc" }, { updatedAt: "desc" }],
+        skip: offset,
+        take: limit,
+      });
+      const remaining = limit - dishLists.length;
+      if (remaining > 0 && restCount > 0) {
+        dishLists = dishLists.concat(
+          await prisma.dishList.findMany({
+            where: restWhere,
+            include: listInclude,
+            orderBy: { updatedAt: "desc" },
+            take: remaining,
+          }),
+        );
+      }
+    } else {
+      dishLists = await prisma.dishList.findMany({
+        where: restWhere,
+        include: listInclude,
+        orderBy: { updatedAt: "desc" },
+        skip: offset - priorityCount,
+        take: limit,
+      });
+    }
+
+    res.json({
+      dishLists: dishLists.map((list) => toDishListSummary(list, userId)),
+      meta: {
+        limit,
+        offset,
+        total,
+        hasMore: offset + dishLists.length < total,
+      },
     });
-
-    // Transform data for frontend
-    const transformedLists = dishLists.map((list) =>
-      toDishListSummary(list, userId),
-    );
-
-    // Sort: default first, then pinned, then by updatedAt
-    transformedLists.sort((a, b) => {
-      if (a.isDefault !== b.isDefault) return b.isDefault ? 1 : -1;
-      if (a.isPinned !== b.isPinned) return b.isPinned ? 1 : -1;
-      return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
-    });
-
-    res.json({ dishLists: transformedLists });
   } catch (error) {
     console.error("Get dishlists error:", error);
     res.status(500).json({ error: "Failed to fetch dishlists" });
@@ -381,8 +443,19 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
       ],
     };
 
-    const [dishList, blockContext] = await Promise.all([
-      prisma.dishList.findFirst({
+    // Resolved first so the recipe filter (and its count) can exclude
+    // blocked creators in the query itself — keeps recipesMeta.hasMore
+    // consistent with the rows actually returned.
+    const blockContext = await getBlockContext(userId);
+    const visibleRecipeWhere = {
+      recipe: {
+        moderationState: "VISIBLE" as const,
+        creatorId: { notIn: blockContext.blockedPeerIds },
+        creator: { status: "ACTIVE" as const },
+      },
+    };
+
+    const dishList = await prisma.dishList.findFirst({
         where: {
           id: dishListId,
           ...visibilityCondition,
@@ -390,7 +463,7 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
         include: {
           _count: {
             select: {
-              recipes: true,
+              recipes: { where: visibleRecipeWhere },
               followers: true,
               collaborators: true,
             },
@@ -413,12 +486,7 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
             select: { userId: true },
           },
           recipes: {
-            where: {
-              recipe: {
-                moderationState: "VISIBLE",
-                creator: { status: "ACTIVE" },
-              },
-            },
+            where: visibleRecipeWhere,
             select: {
               recipe: {
                 // Explicit select keeps the payload lean — notably omits
@@ -458,9 +526,7 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
             select: { userId: true },
           },
         },
-      }),
-      getBlockContext(userId),
-    ]);
+      });
 
     if (!dishList) {
       return res.status(404).json({ error: "DishList not found" });
@@ -484,9 +550,7 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
       isCollaborator: dishList.collaborators.length > 0,
       isFollowing: dishList.followers.length > 0,
       owner: dishList.owner,
-      recipes: dishList.recipes
-        .filter((dr) => !blockContext.isBlocked(dr.recipe.creatorId))
-        .map((dr) => ({
+      recipes: dishList.recipes.map((dr) => ({
         id: dr.recipe.id,
         title: dr.recipe.title,
         description: dr.recipe.description,
@@ -505,7 +569,13 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
         creator: dr.recipe.creator,
         createdAt: dr.recipe.createdAt,
         updatedAt: dr.recipe.updatedAt,
-        })),
+      })),
+      recipesMeta: {
+        limit: recipesLimit,
+        offset: recipesOffset,
+        hasMore:
+          recipesOffset + dishList.recipes.length < dishList._count.recipes,
+      },
       createdAt: dishList.createdAt,
       updatedAt: dishList.updatedAt,
     };
