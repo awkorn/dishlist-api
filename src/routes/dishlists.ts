@@ -65,7 +65,8 @@ function toDishListSummary(list: DishListSummarySource, userId: string) {
     title: list.title,
     visibility: list.visibility,
     isDefault: list.isDefault,
-    isPinned: list.pins.length > 0,
+    // The default "My Recipes" list is permanently pinned by definition.
+    isPinned: list.isDefault || list.pins.length > 0,
     recipeCount: list._count.recipes,
     isOwner: list.ownerId === userId,
     isCollaborator: list.collaborators.length > 0,
@@ -188,7 +189,11 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
       dishLists = await prisma.dishList.findMany({
         where: priorityWhere,
         include: listInclude,
-        orderBy: [{ isDefault: "desc" }, { updatedAt: "desc" }],
+        orderBy: [
+          { isDefault: "desc" },
+          { updatedAt: "desc" },
+          { id: "asc" },
+        ],
         skip: offset,
         take: limit,
       });
@@ -198,7 +203,7 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
           await prisma.dishList.findMany({
             where: restWhere,
             include: listInclude,
-            orderBy: { updatedAt: "desc" },
+            orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
             take: remaining,
           }),
         );
@@ -207,7 +212,7 @@ router.get("/", authToken, async (req: AuthRequest, res) => {
       dishLists = await prisma.dishList.findMany({
         where: restWhere,
         include: listInclude,
-        orderBy: { updatedAt: "desc" },
+        orderBy: [{ updatedAt: "desc" }, { id: "asc" }],
         skip: offset - priorityCount,
         take: limit,
       });
@@ -542,7 +547,7 @@ router.get("/:id", authToken, async (req: AuthRequest, res) => {
       title: dishList.title,
       visibility: dishList.visibility,
       isDefault: dishList.isDefault,
-      isPinned: dishList.pins.length > 0,
+      isPinned: dishList.isDefault || dishList.pins.length > 0,
       recipeCount: dishList._count.recipes,
       followerCount: dishList._count.followers,
       collaboratorCount: dishList._count.collaborators,

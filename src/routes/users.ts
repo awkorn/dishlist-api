@@ -867,7 +867,7 @@ router.get("/:userId", authToken, async (req: AuthRequest, res) => {
             title: d.title,
             visibility: d.visibility,
             isDefault: d.isDefault,
-            isPinned: d.pins.length > 0,
+            isPinned: d.isDefault || d.pins.length > 0,
             recipeCount: d._count.recipes,
             followerCount: d._count.followers,
             isOwner: d.ownerId === currentUserId,
