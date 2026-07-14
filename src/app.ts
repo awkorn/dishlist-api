@@ -9,6 +9,7 @@ import notificationsRouter from "./routes/notifications";
 import nutritionRouter from "./routes/nutrition";
 import pushTokensRouter from "./routes/pushTokens";
 import recipeRouter from "./routes/recipe";
+import recipeImportsRouter from "./routes/recipeImports";
 import reportsRouter from "./routes/reports";
 import searchRouter from "./routes/search";
 import uploadsRouter from "./routes/uploads";
@@ -32,6 +33,9 @@ export function createApp() {
   app.use("/users", usersRouter);
   app.use("/dishlists", dishlistsRouter);
   app.use("/notifications", notificationsRouter);
+  // Mounted before recipeRouter so /recipes/imports/* isn't captured by its
+  // GET /:id route.
+  app.use("/recipes", recipeImportsRouter);
   app.use("/recipes", recipeRouter);
   app.use("/nutrition", nutritionRouter);
   app.use("/invites", invitesRouter);

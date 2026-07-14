@@ -51,6 +51,9 @@ model User {
   // Push tokens
   pushTokens PushToken[]
 
+  // Social media recipe imports
+  recipeImports RecipeImport[]
+
   // Moderation
   submittedReports  ContentReport[]    @relation("ReportsSubmitted")
   receivedReports   ContentReport[]    @relation("ReportsReceived")
@@ -199,6 +202,11 @@ model Recipe {
   notes            String[]               @default([])
   tags             String[]               @default([])
   originalRecipeId String? // For tracking copied recipes
+  // Social-import provenance: link back to the original post + visible
+  // attribution (App Review posture — we store extracted text, never media).
+  sourceUrl        String?
+  sourcePlatform   SocialPlatform?
+  sourceAuthor     String? // e.g. "@halfbakedharvest"
   moderationState  ContentModerationState @default(VISIBLE)
   createdAt        DateTime               @default(now())
   updatedAt        DateTime               @updatedAt
@@ -210,6 +218,7 @@ model Recipe {
   // Relations
   dishLists DishListRecipe[]
   shares    RecipeShare[]
+  imports   RecipeImport[]
 
   // Self-reference for original recipe tracking
   originalRecipe Recipe?  @relation("RecipeCopies", fields: [originalRecipeId], references: [id])
@@ -390,6 +399,33 @@ model Notification {
   @@map("Notification")
 }
 
+// One row per (user, canonical post URL) social-media import attempt. Doubles
+// as the idempotency guard (re-sharing the same post reuses the row) and the
+// status record the app polls. Processing is in-process fire-and-forget, so a
+// server restart can strand PENDING/PROCESSING rows — the status GET applies a
+// staleness backstop and FAILED rows are retried by re-sharing.
+model RecipeImport {
+  id           String             @id @default(cuid())
+  sourceUrl    String // as shared by the user
+  canonicalUrl String // normalized: tracking params stripped, short links resolved
+  platform     SocialPlatform
+  status       RecipeImportStatus @default(PENDING)
+  errorCode    String? // SCRAPE_FAILED | PRIVATE_POST | NO_RECIPE_FOUND | VIDEO_TOO_LONG | MODERATION_BLOCKED | TIMEOUT | INTERNAL
+  errorMessage String? // user-displayable
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+
+  userId String
+  user   User   @relation(fields: [userId], references: [uid], onDelete: Cascade)
+
+  recipeId String?
+  recipe   Recipe? @relation(fields: [recipeId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, canonicalUrl])
+  @@index([userId, createdAt])
+  @@map("RecipeImport")
+}
+
 model PushToken {
   id        String   @id @default(cuid())
   token     String // Expo push token (ExponentPushToken[...])
@@ -421,6 +457,21 @@ enum NotificationType {
   FOLLOW_ACCEPTED
   SYSTEM_UPDATE
   REPORT_RESOLVED
+  RECIPE_IMPORT_COMPLETED
+  RECIPE_IMPORT_FAILED
+}
+
+enum SocialPlatform {
+  TIKTOK
+  INSTAGRAM
+  FACEBOOK
+}
+
+enum RecipeImportStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
 }
 
 enum UserRole {

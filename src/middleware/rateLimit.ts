@@ -100,6 +100,30 @@ export const recipeImportDailyLimiter = rateLimit({
   },
 });
 
+// Guards the social-media import endpoint — scrape fee + GPT-4o + (Phase B) a
+// possible Gemini video pass make this the most expensive call in the app.
+// The daily cap bounds worst-case spend at roughly $1/user/day. Default
+// quotas — safe launch defaults.
+export const socialImportLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  limit: 3, // 3 imports/min/user
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: keyByUser,
+  message: { error: "Too many requests. Please wait a moment and try again." },
+});
+
+export const socialImportDailyLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000, // 1 day
+  limit: 15, // 15 imports/day/user
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: keyByUser,
+  message: {
+    error: "Daily import limit reached. Please try again tomorrow.",
+  },
+});
+
 // Guards the nutrition-calculation endpoint (gpt-4o-mini). Dedicated buckets so
 // nutrition traffic tunes independently of builder/import. Default quotas — safe
 // launch defaults (see PRODUCTION_READINESS.md: recipe → product decision).
