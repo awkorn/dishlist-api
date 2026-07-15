@@ -345,6 +345,7 @@ export function validateImportImages(
 // ─── Import response normalization (moved from routes/recipe.ts) ────
 export interface NormalizedImportedRecipe {
   title: string;
+  description: string | null;
   prepTime: number | null;
   cookTime: number | null;
   servings: number | null;
@@ -358,6 +359,10 @@ export function normalizeImportedRecipe(
   const source = (extracted ?? {}) as Record<string, unknown>;
   return {
     title: typeof source.title === "string" ? source.title : "",
+    description:
+      typeof source.description === "string" && source.description.trim()
+        ? source.description.trim().slice(0, MAX_RECIPE_DESCRIPTION_LENGTH)
+        : null,
     prepTime: typeof source.prepTime === "number" ? source.prepTime : null,
     cookTime: typeof source.cookTime === "number" ? source.cookTime : null,
     servings: typeof source.servings === "number" ? source.servings : null,
