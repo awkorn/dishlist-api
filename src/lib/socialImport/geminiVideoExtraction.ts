@@ -25,7 +25,7 @@ import { RECIPE_JSON_STRUCTURE } from "./captionExtraction";
 import { SocialImportError, type SocialPost } from "./types";
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com";
-const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL = "gemini-3.1-flash-lite";
 
 export const MAX_VIDEO_DURATION_SEC = 600; // 10 minutes
 const MAX_VIDEO_BYTES = 150 * 1024 * 1024;
