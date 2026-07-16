@@ -15,7 +15,7 @@ import {
   detectPlatform,
   extractFirstUrl,
 } from "../lib/socialImport/urlUtils";
-import { IMPORT_ERROR_MESSAGES } from "../lib/socialImport/types";
+import { getImportFailureMessage } from "../lib/socialImport/types";
 
 const router = Router();
 
@@ -33,12 +33,14 @@ const importResponse = (record: {
   sourceUrl: string;
   platform: string;
   createdAt: Date;
+  recipe?: { title: string } | null;
 }) => ({
   importId: record.id,
   status: record.status,
   errorCode: record.errorCode,
   errorMessage: record.errorMessage,
   recipeId: record.recipeId,
+  recipeTitle: record.recipe?.title ?? null,
   sourceUrl: record.sourceUrl,
   platform: record.platform,
   createdAt: record.createdAt,
@@ -152,6 +154,7 @@ router.get("/imports", authToken, async (req: AuthRequest, res) => {
       },
       orderBy: { createdAt: "desc" },
       take: 20,
+      include: { recipe: { select: { title: true } } },
     });
 
     res.json({ imports: records.map(importResponse) });
@@ -167,6 +170,7 @@ router.get("/imports/:id", authToken, async (req: AuthRequest, res) => {
     const userId = req.user!.uid;
     let record = await prisma.recipeImport.findFirst({
       where: { id: req.params.id, userId },
+      include: { recipe: { select: { title: true } } },
     });
 
     if (!record) {
@@ -183,8 +187,9 @@ router.get("/imports/:id", authToken, async (req: AuthRequest, res) => {
         data: {
           status: "FAILED",
           errorCode: "TIMEOUT",
-          errorMessage: IMPORT_ERROR_MESSAGES.TIMEOUT,
+          errorMessage: getImportFailureMessage("TIMEOUT"),
         },
+        include: { recipe: { select: { title: true } } },
       });
     }
 

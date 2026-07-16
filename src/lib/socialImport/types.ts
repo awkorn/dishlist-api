@@ -40,6 +40,14 @@ export const IMPORT_ERROR_MESSAGES: Record<ImportErrorCode, string> = {
   INTERNAL: "Something went wrong importing that post. Please try again.",
 };
 
+export function getImportFailureMessage(
+  code: ImportErrorCode,
+  recipeTitle?: string
+): string {
+  const subject = recipeTitle ? `"${recipeTitle}"` : "The recipe";
+  return `${subject} wasn't added to My Recipes. ${IMPORT_ERROR_MESSAGES[code]}`;
+}
+
 export class SocialImportError extends Error {
   constructor(
     public code: ImportErrorCode,

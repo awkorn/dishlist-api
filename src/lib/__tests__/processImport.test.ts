@@ -147,7 +147,11 @@ describe("processImport — happy paths", () => {
     );
     expect(mockPrisma.notification.create).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ type: "RECIPE_IMPORT_COMPLETED" }),
+        data: expect.objectContaining({
+          type: "RECIPE_IMPORT_COMPLETED",
+          message:
+            '"Garlic Noodles" was successfully added to My Recipes.',
+        }),
       })
     );
   });
@@ -229,6 +233,44 @@ describe("processImport — failure paths", () => {
       })
     );
   }
+
+  it("uses the extracted recipe name in a later failure notification", async () => {
+    (extractRecipeFromCaption as ReturnType<typeof vi.fn>).mockResolvedValue({
+      sufficient: true,
+      recipe: extractedRecipe,
+    });
+    (moderateTextFields as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new ModerationError("blocked")
+    );
+
+    await processImport("imp_1", fetcherReturning(post));
+
+    expect(mockPrisma.notification.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          type: "RECIPE_IMPORT_FAILED",
+          message:
+            '"Garlic Noodles" wasn\'t added to My Recipes. This content can\'t be imported.',
+        }),
+      })
+    );
+  });
+
+  it("identifies My Recipes when a failure happens before extraction", async () => {
+    await processImport(
+      "imp_1",
+      fetcherReturning(new SocialImportError("PRIVATE_POST"))
+    );
+
+    expect(mockPrisma.notification.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          message:
+            "The recipe wasn't added to My Recipes. That post appears to be private or unavailable.",
+        }),
+      })
+    );
+  });
 
   it("marks SCRAPE_FAILED when the fetcher fails", async () => {
     await processImport(

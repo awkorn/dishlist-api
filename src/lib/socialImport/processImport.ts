@@ -15,7 +15,7 @@ import { extractRecipeFromVideo } from "./geminiVideoExtraction";
 import { ingestThumbnail } from "./thumbnail";
 import { canonicalizeSocialUrl } from "./urlUtils";
 import {
-  IMPORT_ERROR_MESSAGES,
+  getImportFailureMessage,
   SocialImportError,
   type SocialPostFetcher,
 } from "./types";
@@ -32,6 +32,7 @@ export async function processImport(
   importId: string,
   fetcher: SocialPostFetcher = defaultFetcher
 ): Promise<void> {
+  let recipeTitle: string | undefined;
   let timeoutHandle: NodeJS.Timeout | undefined;
   const watchdog = new Promise<never>((_, reject) => {
     timeoutHandle = setTimeout(
@@ -41,15 +42,24 @@ export async function processImport(
   });
 
   try {
-    await Promise.race([runPipeline(importId, fetcher), watchdog]);
+    await Promise.race([
+      runPipeline(importId, fetcher, (title) => {
+        recipeTitle = title;
+      }),
+      watchdog,
+    ]);
   } catch (error) {
-    await markFailed(importId, error);
+    await markFailed(importId, error, recipeTitle);
   } finally {
     clearTimeout(timeoutHandle);
   }
 }
 
-async function runPipeline(importId: string, fetcher: SocialPostFetcher) {
+async function runPipeline(
+  importId: string,
+  fetcher: SocialPostFetcher,
+  onRecipeTitle: (title: string) => void
+) {
   const importRecord = await prisma.recipeImport.update({
     where: { id: importId },
     data: { status: "PROCESSING" },
@@ -83,6 +93,7 @@ async function runPipeline(importId: string, fetcher: SocialPostFetcher) {
   } else {
     recipe = await extractRecipeFromVideo(post);
   }
+  onRecipeTitle(recipe.title.slice(0, 100) || "Imported Recipe");
 
   // 3. Moderate the extracted text exactly like a user-created recipe.
   try {
@@ -170,7 +181,7 @@ async function runPipeline(importId: string, fetcher: SocialPostFetcher) {
     data: {
       type: "RECIPE_IMPORT_COMPLETED",
       title: "Recipe saved",
-      message: `"${savedRecipe.title}" was added to My Recipes`,
+      message: `"${savedRecipe.title}" was successfully added to My Recipes.`,
       receiverId: userId,
       data: JSON.stringify({
         recipeId: savedRecipe.id,
@@ -181,7 +192,11 @@ async function runPipeline(importId: string, fetcher: SocialPostFetcher) {
   });
 }
 
-async function markFailed(importId: string, error: unknown) {
+async function markFailed(
+  importId: string,
+  error: unknown,
+  recipeTitle?: string
+) {
   const known =
     error instanceof SocialImportError
       ? error
@@ -193,22 +208,27 @@ async function markFailed(importId: string, error: unknown) {
   }
 
   try {
+    const failureMessage = getImportFailureMessage(known.code, recipeTitle);
     const record = await prisma.recipeImport.update({
       where: { id: importId },
       data: {
         status: "FAILED",
         errorCode: known.code,
-        errorMessage: IMPORT_ERROR_MESSAGES[known.code],
+        errorMessage: failureMessage,
       },
     });
 
     await prisma.notification.create({
       data: {
         type: "RECIPE_IMPORT_FAILED",
-        title: "Couldn't save recipe",
-        message: IMPORT_ERROR_MESSAGES[known.code],
+        title: "Recipe not added",
+        message: failureMessage,
         receiverId: record.userId,
-        data: JSON.stringify({ importId, errorCode: known.code }),
+        data: JSON.stringify({
+          importId,
+          errorCode: known.code,
+          recipeTitle,
+        }),
       },
     });
   } catch (updateError) {
