@@ -56,7 +56,7 @@ describe("extractRecipeFromCaption", () => {
     expect(result.sufficient).toBe(true);
     if (result.sufficient) {
       expect(result.recipe.title).toBe("Garlic Butter Noodles");
-      expect(result.recipe.description).toBe("Quick weeknight pasta");
+      expect(result.recipe.description).toBeNull();
       expect(result.recipe.ingredients).toHaveLength(1);
     }
   });

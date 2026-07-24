@@ -81,7 +81,7 @@ const post: SocialPost = {
 
 const extractedRecipe = {
   title: "Garlic Noodles",
-  description: null,
+  description: "This should never be saved",
   prepTime: 5,
   cookTime: 10,
   servings: 2,
@@ -129,6 +129,7 @@ describe("processImport — happy paths", () => {
       expect.objectContaining({
         data: expect.objectContaining({
           title: "Garlic Noodles",
+          description: null,
           sourceUrl: post.resolvedUrl,
           sourcePlatform: "TIKTOK",
           sourceAuthor: "@lynja",

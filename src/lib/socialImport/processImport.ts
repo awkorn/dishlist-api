@@ -100,7 +100,6 @@ async function runPipeline(
     await moderateTextFields(
       [
         { label: "Recipe title", value: recipe.title },
-        { label: "Recipe description", value: recipe.description },
         { label: "Recipe ingredients", value: recipe.ingredients },
         { label: "Recipe instructions", value: recipe.instructions },
       ],
@@ -144,7 +143,7 @@ async function runPipeline(
     const created = await tx.recipe.create({
       data: {
         title: recipe.title.slice(0, 100) || "Imported Recipe",
-        description: recipe.description,
+        description: null,
         ingredients: cleanedIngredients as unknown as Prisma.InputJsonValue,
         instructions: cleanedInstructions as unknown as Prisma.InputJsonValue,
         prepTime: recipe.prepTime,

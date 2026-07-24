@@ -27,7 +27,6 @@ export type CaptionExtractionResult =
 // Shared with the Gemini fallback so both extractors emit the same shape.
 export const RECIPE_JSON_STRUCTURE = `{
   "title": "Recipe Name",
-  "description": "Brief description if available",
   "prepTime": number or null (in minutes),
   "cookTime": number or null (in minutes),
   "servings": number or null,
@@ -129,5 +128,8 @@ ${trimmedCaption}
     return { sufficient: false };
   }
 
-  return { sufficient: true, recipe };
+  return {
+    sufficient: true,
+    recipe: { ...recipe, description: null },
+  };
 }

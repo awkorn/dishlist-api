@@ -298,5 +298,5 @@ ${RECIPE_JSON_STRUCTURE}
     throw new SocialImportError("NO_RECIPE_FOUND");
   }
 
-  return recipe;
+  return { ...recipe, description: null };
 }
