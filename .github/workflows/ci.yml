@@ -31,6 +31,9 @@ jobs:
 
       - name: Test
         run: npm test
+        env:
+          SUPABASE_URL: https://example.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: ci-test-service-role-key
 
       - name: Build
         run: npm run build
