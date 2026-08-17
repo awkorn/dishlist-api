@@ -11,6 +11,7 @@ import {
   type NormalizedImportedRecipe,
 } from "../recipeValidation";
 import { SocialImportError } from "./types";
+import { withTimeoutSignal } from "./safeRemoteFetch";
 
 // Captions shorter than this can't hold an ingredient list — skip the model
 // call entirely and go straight to the video fallback.
@@ -21,7 +22,12 @@ export const MIN_CAPTION_LENGTH = 80;
 const MAX_CAPTION_LENGTH = 8000;
 
 export type CaptionExtractionResult =
-  | { sufficient: true; recipe: NormalizedImportedRecipe }
+  | {
+      sufficient: true;
+      recipe: NormalizedImportedRecipe;
+      multipleRecipesDetected: boolean;
+      language: string | null;
+    }
   | { sufficient: false };
 
 // Shared with the Gemini fallback so both extractors emit the same shape.
@@ -51,7 +57,8 @@ Rules:
 - Do not include empty strings in arrays`;
 
 export async function extractRecipeFromCaption(
-  caption: string | null
+  caption: string | null,
+  options?: { signal?: AbortSignal }
 ): Promise<CaptionExtractionResult> {
   if (!caption || caption.trim().length < MIN_CAPTION_LENGTH) {
     return { sufficient: false };
@@ -63,7 +70,7 @@ export async function extractRecipeFromCaption(
 
 First decide whether the caption itself contains a usable recipe: it must name an identifiable dish AND include a substantially complete ingredient list (instructions may be brief or summarized). Captions that are only a teaser ("recipe in comments", "link in bio", "follow for the recipe"), only hashtags, or missing ingredient amounts/lists are NOT usable.
 
-- If the caption contains a usable recipe, respond with: {"sufficient": true, "recipe": <recipe object>}
+- If the caption contains a usable recipe, respond with: {"sufficient": true, "recipe": <recipe object>, "multipleRecipesDetected": boolean, "language": "BCP-47 language code or null"}
 - If it does not, respond with: {"sufficient": false, "reason": "brief reason"}
 
 Do NOT invent ingredients, amounts, or steps that are not present in the caption.
@@ -90,6 +97,7 @@ ${trimmedCaption}
       temperature: 0.1,
       response_format: { type: "json_object" },
     }),
+    signal: withTimeoutSignal(options?.signal, 60_000),
   });
 
   if (!response.ok) {
@@ -116,7 +124,12 @@ ${trimmedCaption}
     throw new SocialImportError("INTERNAL", "OpenAI returned invalid JSON");
   }
 
-  const result = parsed as { sufficient?: unknown; recipe?: unknown };
+  const result = parsed as {
+    sufficient?: unknown;
+    recipe?: unknown;
+    multipleRecipesDetected?: unknown;
+    language?: unknown;
+  };
   if (result?.sufficient !== true || !result.recipe) {
     return { sufficient: false };
   }
@@ -131,5 +144,7 @@ ${trimmedCaption}
   return {
     sufficient: true,
     recipe: { ...recipe, description: null },
+    multipleRecipesDetected: result.multipleRecipesDetected === true,
+    language: typeof result.language === "string" ? result.language.slice(0, 20) : null,
   };
 }

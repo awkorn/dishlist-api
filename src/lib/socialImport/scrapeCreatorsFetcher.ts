@@ -24,6 +24,8 @@ const PLATFORM_PATHS: Record<SocialPlatform, string> = {
   TIKTOK: "/v2/tiktok/video",
   INSTAGRAM: "/v1/instagram/post",
   FACEBOOK: "/v1/facebook/post",
+  YOUTUBE: "/v1/youtube/video",
+  PINTEREST: "/v1/pinterest/pin",
 };
 
 type Raw = Record<string, any>;
@@ -40,12 +42,22 @@ function firstUrl(list: unknown): string | null {
   return Array.isArray(list) ? str(list[0]) : null;
 }
 
+function stringUrls(values: unknown): string[] {
+  if (!Array.isArray(values)) return [];
+  return values.map(str).filter((value): value is string => value !== null);
+}
+
 function mapTikTok(raw: Raw, inputUrl: string): SocialPost {
   const detail = raw?.aweme_detail ?? {};
   const video = detail?.video ?? {};
   const authorHandle = str(detail?.author?.unique_id);
   const awemeId = str(detail?.aweme_id);
   const durationMs = num(video?.duration);
+  const slideshowImages = Array.isArray(detail?.image_post_info?.images)
+    ? detail.image_post_info.images
+        .map((image: Raw) => firstUrl(image?.display_image?.url_list))
+        .filter((url: string | null): url is string => url !== null)
+    : [];
 
   return {
     platform: "TIKTOK",
@@ -65,6 +77,9 @@ function mapTikTok(raw: Raw, inputUrl: string): SocialPost {
       firstUrl(video?.download_no_watermark_addr?.url_list) ??
       firstUrl(video?.download_addr?.url_list),
     durationSec: durationMs !== null ? Math.round(durationMs / 1000) : null,
+    imageUrls: slideshowImages,
+    outboundUrls: [],
+    language: null,
   };
 }
 
@@ -72,6 +87,11 @@ function mapInstagram(raw: Raw, inputUrl: string): SocialPost {
   const media = raw?.data?.xdt_shortcode_media ?? {};
   const username = str(media?.owner?.username);
   const shortcode = str(media?.shortcode);
+  const sidecarImages = Array.isArray(media?.edge_sidecar_to_children?.edges)
+    ? media.edge_sidecar_to_children.edges
+        .map((edge: Raw) => str(edge?.node?.display_url))
+        .filter((url: string | null): url is string => url !== null)
+    : [];
 
   return {
     platform: "INSTAGRAM",
@@ -86,6 +106,9 @@ function mapInstagram(raw: Raw, inputUrl: string): SocialPost {
       num(media?.video_duration) !== null
         ? Math.round(media.video_duration)
         : null,
+    imageUrls: sidecarImages,
+    outboundUrls: [],
+    language: null,
   };
 }
 
@@ -103,6 +126,68 @@ function mapFacebook(raw: Raw, inputUrl: string): SocialPost {
       num(video?.length_in_second) !== null
         ? Math.round(video.length_in_second)
         : null,
+    imageUrls: stringUrls(
+      Array.isArray(raw?.images)
+        ? raw.images.map((image: Raw | string) =>
+            typeof image === "string" ? image : image?.url
+          )
+        : []
+    ),
+    outboundUrls: [],
+    language: null,
+  };
+}
+
+function mapYouTube(raw: Raw, inputUrl: string): SocialPost {
+  const data = raw?.data ?? raw;
+  const id = str(data?.id) ?? str(data?.videoId);
+  const channel = data?.channel ?? data?.author ?? {};
+  const thumbnails = data?.thumbnails ?? data?.thumbnail ?? {};
+  const thumbnailUrl =
+    str(thumbnails?.maxres?.url) ??
+    str(thumbnails?.high?.url) ??
+    str(thumbnails?.url) ??
+    (typeof thumbnails === "string" ? str(thumbnails) : null);
+  const durationMs = num(data?.durationMs);
+  const durationSec = num(data?.durationSec);
+  const title = str(data?.title);
+  const description = str(data?.description);
+  return {
+    platform: "YOUTUBE",
+    resolvedUrl: id ? `https://youtube.com/watch?v=${id}` : str(data?.url) ?? inputUrl,
+    caption: [title, description].filter(Boolean).join("\n\n") || null,
+    authorHandle: str(channel?.handle) ?? str(channel?.title) ?? str(data?.channelTitle),
+    thumbnailUrl,
+    imageUrls: [],
+    outboundUrls: [],
+    videoUrl: null,
+    durationSec:
+      durationMs !== null
+        ? Math.round(durationMs / 1000)
+        : durationSec !== null
+          ? Math.round(durationSec)
+          : null,
+    language: null,
+  };
+}
+
+function mapPinterest(raw: Raw, inputUrl: string): SocialPost {
+  const data = raw?.data ?? raw?.pin ?? raw;
+  const pinner = data?.originPinner ?? data?.pinner ?? data?.owner ?? {};
+  const image = data?.image736x ?? data?.images?.orig ?? data?.image ?? {};
+  const imageUrl = typeof image === "string" ? str(image) : str(image?.url);
+  const id = str(data?.id) ?? inputUrl.match(/\/pin\/(\d+)/)?.[1] ?? null;
+  return {
+    platform: "PINTEREST",
+    resolvedUrl: id ? `https://pinterest.com/pin/${id}` : str(data?.url) ?? inputUrl,
+    caption: str(data?.description) ?? str(data?.title),
+    authorHandle: str(pinner?.username) ?? str(pinner?.fullName) ?? str(pinner?.name),
+    thumbnailUrl: imageUrl,
+    imageUrls: imageUrl ? [imageUrl] : [],
+    outboundUrls: stringUrls([data?.link, data?.richMetadata?.site?.url]),
+    videoUrl: str(data?.video?.url),
+    durationSec: num(data?.video?.duration),
+    language: null,
   };
 }
 
@@ -110,6 +195,8 @@ const MAPPERS: Record<SocialPlatform, (raw: Raw, url: string) => SocialPost> = {
   TIKTOK: mapTikTok,
   INSTAGRAM: mapInstagram,
   FACEBOOK: mapFacebook,
+  YOUTUBE: mapYouTube,
+  PINTEREST: mapPinterest,
 };
 
 /**
@@ -125,7 +212,11 @@ export function mapScrapeCreatorsResponse(
 }
 
 export class ScrapeCreatorsFetcher implements SocialPostFetcher {
-  async fetchPost(url: string, platform: SocialPlatform): Promise<SocialPost> {
+  async fetchPost(
+    url: string,
+    platform: SocialPlatform,
+    options?: { signal?: AbortSignal }
+  ): Promise<SocialPost> {
     const apiKey = process.env.SCRAPECREATORS_API_KEY;
     if (!apiKey) {
       console.error("SCRAPECREATORS_API_KEY is not configured");
@@ -138,10 +229,12 @@ export class ScrapeCreatorsFetcher implements SocialPostFetcher {
     try {
       response = await fetch(endpoint, {
         headers: { "x-api-key": apiKey },
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        signal: options?.signal
+          ? AbortSignal.any([options.signal, AbortSignal.timeout(FETCH_TIMEOUT_MS)])
+          : AbortSignal.timeout(FETCH_TIMEOUT_MS),
       });
     } catch (error) {
-      if ((error as Error)?.name === "TimeoutError") {
+      if ((error as Error)?.name === "TimeoutError" || options?.signal?.aborted) {
         throw new SocialImportError("TIMEOUT", "Scrape request timed out");
       }
       throw new SocialImportError(
@@ -177,6 +270,42 @@ export class ScrapeCreatorsFetcher implements SocialPostFetcher {
       throw new SocialImportError("SCRAPE_FAILED", `Vendor error: ${message}`);
     }
 
-    return mapScrapeCreatorsResponse(platform, raw, url);
+    const post = mapScrapeCreatorsResponse(platform, raw, url);
+
+    // The details response intentionally omits transcript text. Fetching the
+    // documented transcript endpoint gives caption-first extraction the same
+    // spoken/on-screen context without downloading or retaining the video.
+    if (platform === "YOUTUBE") {
+      try {
+        const transcriptResponse = await fetch(
+          `${BASE_URL}/v1/youtube/video/transcript?url=${encodeURIComponent(post.resolvedUrl)}`,
+          {
+            headers: { "x-api-key": apiKey },
+            signal: options?.signal
+              ? AbortSignal.any([options.signal, AbortSignal.timeout(FETCH_TIMEOUT_MS)])
+              : AbortSignal.timeout(FETCH_TIMEOUT_MS),
+          }
+        );
+        if (transcriptResponse.ok) {
+          const transcriptBody = (await transcriptResponse.json()) as Raw;
+          const transcript =
+            str(transcriptBody?.transcript_only_text) ??
+            str(transcriptBody?.data?.transcript_only_text);
+          const language =
+            str(transcriptBody?.language) ?? str(transcriptBody?.data?.language);
+          if (transcript) {
+            post.caption = [post.caption, `Transcript:\n${transcript}`]
+              .filter(Boolean)
+              .join("\n\n");
+          }
+          post.language = language;
+        }
+      } catch (error) {
+        if (options?.signal?.aborted) throw error;
+        console.warn("YouTube transcript fallback unavailable:", error);
+      }
+    }
+
+    return post;
   }
 }

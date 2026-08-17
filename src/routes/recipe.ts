@@ -643,6 +643,9 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
         nutrition: nutritionData,
         notes: normalizedNotes.notes || [],
         tags: tags ? normalizeTags(tags) : [],
+        // Saving the editor is an explicit human review of AI-imported data.
+        importNeedsReview: false,
+        importWarnings: [],
       } as any,
       include: {
         creator: {
@@ -655,6 +658,15 @@ router.put("/:id", authToken, async (req: AuthRequest, res) => {
         },
       },
     });
+
+    await prisma.recipeImport
+      .updateMany({
+        where: { recipeId, userId, status: "REVIEW_REQUIRED" },
+        data: { status: "COMPLETED", phase: "REVIEWED", warnings: [] },
+      })
+      .catch((error) =>
+        console.error(`Failed to clear import review state for ${recipeId}:`, error)
+      );
 
     res.json({ recipe: recipeWithImageUrls(updatedRecipe) });
   } catch (error) {

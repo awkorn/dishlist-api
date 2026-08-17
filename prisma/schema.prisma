@@ -207,6 +207,11 @@ model Recipe {
   sourceUrl        String?
   sourcePlatform   SocialPlatform?
   sourceAuthor     String? // e.g. "@halfbakedharvest"
+  sourceLanguage   String?
+  importWarnings   String[]               @default([])
+  importConfidence Float?
+  importNeedsReview Boolean                @default(false)
+  importSource      String? // caption | linked_website | transcript | video
   moderationState  ContentModerationState @default(VISIBLE)
   createdAt        DateTime               @default(now())
   updatedAt        DateTime               @updatedAt
@@ -399,21 +404,32 @@ model Notification {
   @@map("Notification")
 }
 
-// One row per (user, canonical post URL) social-media import attempt. Doubles
-// as the idempotency guard (re-sharing the same post reuses the row) and the
-// status record the app polls. Processing is in-process fire-and-forget, so a
-// server restart can strand PENDING/PROCESSING rows — the status GET applies a
-// staleness backstop and FAILED rows are retried by re-sharing.
+// Durable queue + status record for a social-media recipe import. Workers claim
+// rows with an expiring lease; expired leases are safe to reclaim after a
+// restart, and terminal/presentation metadata powers Import Activity in-app.
 model RecipeImport {
-  id           String             @id @default(cuid())
-  sourceUrl    String // as shared by the user
-  canonicalUrl String // normalized: tracking params stripped, short links resolved
-  platform     SocialPlatform
-  status       RecipeImportStatus @default(PENDING)
-  errorCode    String? // SCRAPE_FAILED | PRIVATE_POST | NO_RECIPE_FOUND | VIDEO_TOO_LONG | MODERATION_BLOCKED | TIMEOUT | INTERNAL
-  errorMessage String? // user-displayable
-  createdAt    DateTime           @default(now())
-  updatedAt    DateTime           @updatedAt
+  id               String             @id @default(cuid())
+  sourceUrl        String // as shared by the user
+  canonicalUrl     String // stable public post URL; tracking data removed
+  platformPostId   String? // stable vendor content id after redirect resolution
+  platform         SocialPlatform
+  status           RecipeImportStatus @default(PENDING)
+  phase            String             @default("QUEUED")
+  attempt          Int                @default(0)
+  leaseToken       String?
+  leaseExpiresAt   DateTime?
+  nextAttemptAt    DateTime           @default(now())
+  cancelRequestedAt DateTime?
+  startedAt        DateTime?
+  finishedAt       DateTime?
+  presentedAt      DateTime?
+  extractionSource String?
+  warnings         String[]           @default([])
+  confidence       Float?
+  errorCode        String? // SCRAPE_FAILED | PRIVATE_POST | NO_RECIPE_FOUND | VIDEO_TOO_LONG | MODERATION_BLOCKED | TIMEOUT | INTERNAL
+  errorMessage     String? // user-displayable
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
 
   userId String
   user   User   @relation(fields: [userId], references: [uid], onDelete: Cascade)
@@ -422,6 +438,8 @@ model RecipeImport {
   recipe   Recipe? @relation(fields: [recipeId], references: [id], onDelete: SetNull)
 
   @@unique([userId, canonicalUrl])
+  @@unique([userId, platform, platformPostId])
+  @@index([status, nextAttemptAt, leaseExpiresAt])
   @@index([userId, createdAt])
   @@map("RecipeImport")
 }
@@ -465,13 +483,17 @@ enum SocialPlatform {
   TIKTOK
   INSTAGRAM
   FACEBOOK
+  YOUTUBE
+  PINTEREST
 }
 
 enum RecipeImportStatus {
   PENDING
   PROCESSING
   COMPLETED
+  REVIEW_REQUIRED
   FAILED
+  CANCELLED
 }
 
 enum UserRole {

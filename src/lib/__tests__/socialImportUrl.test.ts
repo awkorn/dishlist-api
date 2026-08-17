@@ -3,6 +3,7 @@ import {
   canonicalizeSocialUrl,
   detectPlatform,
   extractFirstUrl,
+  extractPlatformPostId,
 } from "../socialImport/urlUtils";
 
 describe("detectPlatform", () => {
@@ -18,14 +19,14 @@ describe("detectPlatform", () => {
     ["https://fb.watch/abc123/", "FACEBOOK"],
     ["https://m.facebook.com/watch/?v=123", "FACEBOOK"],
     ["https://fb.com/some/post", "FACEBOOK"],
+    ["https://www.youtube.com/watch?v=abc", "YOUTUBE"],
+    ["https://youtu.be/abc", "YOUTUBE"],
+    ["https://pinterest.com/pin/123", "PINTEREST"],
   ])("detects %s as %s", (url, platform) => {
     expect(detectPlatform(url)).toBe(platform);
   });
 
   it.each([
-    "https://www.youtube.com/watch?v=abc",
-    "https://youtu.be/abc",
-    "https://pinterest.com/pin/123",
     "https://eviltiktok.com/@user/video/1",
     "https://tiktok.com.evil.io/x",
     "not a url",
@@ -62,6 +63,27 @@ describe("canonicalizeSocialUrl", () => {
     );
     const b = canonicalizeSocialUrl("https://instagram.com/reel/C0abc");
     expect(a).toBe(b);
+  });
+
+  it("preserves Facebook watch identity while dropping tracking data", () => {
+    expect(
+      canonicalizeSocialUrl("https://m.facebook.com/watch/?v=123&utm_source=x")
+    ).toBe("https://facebook.com/watch?v=123");
+    expect(canonicalizeSocialUrl("https://facebook.com/watch?v=456")).not.toBe(
+      canonicalizeSocialUrl("https://facebook.com/watch?v=123")
+    );
+  });
+});
+
+describe("extractPlatformPostId", () => {
+  it.each([
+    ["https://tiktok.com/@cook/video/123", "TIKTOK", "123"],
+    ["https://instagram.com/reel/AbC", "INSTAGRAM", "AbC"],
+    ["https://facebook.com/watch?v=456", "FACEBOOK", "456"],
+    ["https://youtu.be/yt-id", "YOUTUBE", "yt-id"],
+    ["https://pinterest.com/pin/789", "PINTEREST", "789"],
+  ] as const)("extracts identity from %s", (url, platform, expected) => {
+    expect(extractPlatformPostId(url, platform)).toBe(expected);
   });
 });
 

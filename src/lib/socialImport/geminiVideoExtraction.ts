@@ -23,6 +23,7 @@ import {
 } from "../recipeValidation";
 import { RECIPE_JSON_STRUCTURE } from "./captionExtraction";
 import { SocialImportError, type SocialPost } from "./types";
+import { safeRemoteFetch, withTimeoutSignal } from "./safeRemoteFetch";
 
 const GEMINI_BASE = "https://generativelanguage.googleapis.com";
 const GEMINI_MODEL = "gemini-3.1-flash-lite";
@@ -35,7 +36,8 @@ const FILE_ACTIVE_TIMEOUT_MS = 2 * 60 * 1000;
 const GENERATE_TIMEOUT_MS = 120_000;
 
 export async function extractRecipeFromVideo(
-  post: SocialPost
+  post: SocialPost,
+  options?: { signal?: AbortSignal }
 ): Promise<NormalizedImportedRecipe> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -57,11 +59,11 @@ export async function extractRecipeFromVideo(
   let geminiFileName: string | null = null;
 
   try {
-    const videoBytes = await downloadVideo(post.videoUrl, tmpPath);
-    const file = await uploadToGemini(apiKey, tmpPath, videoBytes);
+    const videoBytes = await downloadVideo(post.videoUrl, tmpPath, options?.signal);
+    const file = await uploadToGemini(apiKey, tmpPath, videoBytes, options?.signal);
     geminiFileName = file.name;
-    await waitUntilActive(apiKey, file.name);
-    return await generateRecipe(apiKey, file.uri, post.caption);
+    await waitUntilActive(apiKey, file.name, options?.signal);
+    return await generateRecipe(apiKey, file.uri, post.caption, options?.signal);
   } finally {
     // The transient video copies must never outlive the extraction.
     await fsp.unlink(tmpPath).catch(() => {});
@@ -73,14 +75,20 @@ export async function extractRecipeFromVideo(
   }
 }
 
-async function downloadVideo(videoUrl: string, tmpPath: string) {
+async function downloadVideo(
+  videoUrl: string,
+  tmpPath: string,
+  signal?: AbortSignal
+) {
   let response: Response;
   try {
-    response = await fetch(videoUrl, {
-      signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+    response = await safeRemoteFetch(videoUrl, {
+      signal: withTimeoutSignal(signal, DOWNLOAD_TIMEOUT_MS),
+      maxBytes: MAX_VIDEO_BYTES,
+      allowedMimePrefixes: ["video/", "application/octet-stream"],
     });
   } catch (error) {
-    if ((error as Error)?.name === "TimeoutError") {
+    if ((error as Error)?.name === "TimeoutError" || signal?.aborted) {
       throw new SocialImportError("TIMEOUT", "Video download timed out");
     }
     throw new SocialImportError(
@@ -115,7 +123,9 @@ async function downloadVideo(videoUrl: string, tmpPath: string) {
   });
 
   try {
-    await pipeline(response.body, capGuard, fs.createWriteStream(tmpPath));
+    await pipeline(response.body, capGuard, fs.createWriteStream(tmpPath), {
+      signal,
+    });
   } catch (error) {
     if (error instanceof SocialImportError) throw error;
     throw new SocialImportError(
@@ -130,7 +140,8 @@ async function downloadVideo(videoUrl: string, tmpPath: string) {
 async function uploadToGemini(
   apiKey: string,
   tmpPath: string,
-  videoBytes: number
+  videoBytes: number,
+  signal?: AbortSignal
 ): Promise<{ name: string; uri: string }> {
   // Resumable upload: start → single upload+finalize chunk.
   const startResponse = await fetch(`${GEMINI_BASE}/upload/v1beta/files`, {
@@ -144,6 +155,7 @@ async function uploadToGemini(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ file: { display_name: "social-import" } }),
+    signal: withTimeoutSignal(signal, 30_000),
   });
 
   const uploadUrl = startResponse.headers.get("x-goog-upload-url");
@@ -162,6 +174,7 @@ async function uploadToGemini(
     body: fs.createReadStream(tmpPath) as unknown as BodyInit,
     // @ts-expect-error Node fetch requires duplex for stream bodies.
     duplex: "half",
+    signal: withTimeoutSignal(signal, 90_000),
   });
 
   if (!uploadResponse.ok) {
@@ -178,11 +191,16 @@ async function uploadToGemini(
   return { name: uploaded.file.name, uri: uploaded.file.uri };
 }
 
-async function waitUntilActive(apiKey: string, fileName: string) {
+async function waitUntilActive(
+  apiKey: string,
+  fileName: string,
+  signal?: AbortSignal
+) {
   const deadline = Date.now() + FILE_ACTIVE_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const response = await fetch(`${GEMINI_BASE}/v1beta/${fileName}`, {
       headers: { "x-goog-api-key": apiKey },
+      signal: withTimeoutSignal(signal, 15_000),
     });
     if (response.ok) {
       const file = (await response.json()) as { state?: string };
@@ -191,9 +209,17 @@ async function waitUntilActive(apiKey: string, fileName: string) {
         throw new SocialImportError("INTERNAL", "Gemini file processing failed");
       }
     }
-    await new Promise((resolve) =>
-      setTimeout(resolve, FILE_ACTIVE_POLL_INTERVAL_MS)
-    );
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, FILE_ACTIVE_POLL_INTERVAL_MS);
+      signal?.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          reject(new SocialImportError("TIMEOUT"));
+        },
+        { once: true }
+      );
+    });
   }
   throw new SocialImportError("TIMEOUT", "Gemini file never became ACTIVE");
 }
@@ -208,7 +234,8 @@ async function deleteGeminiFile(apiKey: string, fileName: string) {
 async function generateRecipe(
   apiKey: string,
   fileUri: string,
-  caption: string | null
+  caption: string | null,
+  signal?: AbortSignal
 ): Promise<NormalizedImportedRecipe> {
   const prompt = `You are a recipe extraction assistant. Watch this cooking video and extract the complete recipe.
 
@@ -252,11 +279,11 @@ ${RECIPE_JSON_STRUCTURE}
             maxOutputTokens: 4000,
           },
         }),
-        signal: AbortSignal.timeout(GENERATE_TIMEOUT_MS),
+        signal: withTimeoutSignal(signal, GENERATE_TIMEOUT_MS),
       }
     );
   } catch (error) {
-    if ((error as Error)?.name === "TimeoutError") {
+    if ((error as Error)?.name === "TimeoutError" || signal?.aborted) {
       throw new SocialImportError("TIMEOUT", "Gemini generation timed out");
     }
     throw new SocialImportError(

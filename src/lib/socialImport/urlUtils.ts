@@ -11,6 +11,8 @@ const PLATFORM_HOSTS: Record<SocialPlatform, string[]> = {
   TIKTOK: ["tiktok.com", "vm.tiktok.com", "vt.tiktok.com"],
   INSTAGRAM: ["instagram.com", "instagr.am"],
   FACEBOOK: ["facebook.com", "fb.com", "fb.watch"],
+  YOUTUBE: ["youtube.com", "youtu.be"],
+  PINTEREST: ["pinterest.com", "pin.it"],
 };
 
 function hostMatches(hostname: string, allowed: string) {
@@ -45,7 +47,67 @@ export function canonicalizeSocialUrl(url: string): string {
   const parsed = new URL(url);
   const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
   let path = parsed.pathname.replace(/\/+$/, "");
+  const platform = detectPlatform(url);
+  const postId = platform ? extractPlatformPostId(url, platform) : null;
+  // Preserve recognizable public paths. Only identity-bearing query values
+  // survive (tracking/search params never become part of the dedupe key).
+  if (platform === "YOUTUBE" && postId) {
+    return `https://youtube.com/watch?v=${encodeURIComponent(postId)}`;
+  }
+  if (platform === "FACEBOOK" && postId && !path.match(/\/(?:reel|videos?|video)\//)) {
+    return `https://facebook.com/watch?v=${encodeURIComponent(postId)}`;
+  }
+
   return `https://${host}${path}`;
+}
+
+/** Extract a stable content identifier without relying on tracking params. */
+export function extractPlatformPostId(
+  url: string,
+  platform: SocialPlatform = detectPlatform(url) as SocialPlatform
+): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  switch (platform) {
+    case "TIKTOK": {
+      const index = segments.indexOf("video");
+      return index >= 0 ? segments[index + 1] ?? null : null;
+    }
+    case "INSTAGRAM":
+      return ["p", "reel", "tv"].includes(segments[0] ?? "")
+        ? segments[1] ?? null
+        : null;
+    case "FACEBOOK": {
+      const index = segments.findIndex((part) =>
+        ["reel", "videos", "video"].includes(part)
+      );
+      return (
+        (index >= 0 ? segments[index + 1] : null) ??
+        parsed.searchParams.get("v") ??
+        parsed.searchParams.get("story_fbid") ??
+        parsed.searchParams.get("fbid")
+      );
+    }
+    case "YOUTUBE":
+      if (parsed.hostname.toLowerCase().endsWith("youtu.be")) {
+        return segments[0] ?? null;
+      }
+      if (["shorts", "live", "embed"].includes(segments[0] ?? "")) {
+        return segments[1] ?? null;
+      }
+      return parsed.searchParams.get("v");
+    case "PINTEREST": {
+      const index = segments.indexOf("pin");
+      return index >= 0 ? segments[index + 1] ?? null : null;
+    }
+    default:
+      return null;
+  }
 }
 
 /**
@@ -58,4 +120,10 @@ export function extractFirstUrl(text: string): string | null {
   if (!match) return null;
   // Strip common trailing punctuation the regex may have swallowed.
   return match[0].replace(/[).,!?]+$/, "");
+}
+
+export function extractUrls(text: string): string[] {
+  return [...text.matchAll(/https?:\/\/[^\s"'<>]+/gi)].map((match) =>
+    match[0].replace(/[).,!?]+$/, "")
+  );
 }

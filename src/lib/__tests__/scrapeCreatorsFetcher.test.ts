@@ -64,6 +64,9 @@ describe("mapScrapeCreatorsResponse — TikTok", () => {
       thumbnailUrl: "https://cdn.tiktok.com/cover1.jpg",
       videoUrl: "https://cdn.tiktok.com/play.mp4",
       durationSec: 90,
+      imageUrls: [],
+      outboundUrls: [],
+      language: null,
     });
   });
 
@@ -102,6 +105,9 @@ describe("mapScrapeCreatorsResponse — Instagram", () => {
       thumbnailUrl: "https://cdn.instagram.com/thumb.jpg",
       videoUrl: "https://cdn.instagram.com/video.mp4",
       durationSec: 71,
+      imageUrls: [],
+      outboundUrls: [],
+      language: null,
     });
   });
 
@@ -128,6 +134,9 @@ describe("mapScrapeCreatorsResponse — Facebook", () => {
       thumbnailUrl: "https://cdn.fb.com/thumb.jpg",
       videoUrl: "https://cdn.fb.com/hd.mp4",
       durationSec: 23,
+      imageUrls: [],
+      outboundUrls: [],
+      language: null,
     });
   });
 
@@ -136,5 +145,45 @@ describe("mapScrapeCreatorsResponse — Facebook", () => {
     delete (fixture.video as any).hd_url;
     const post = mapScrapeCreatorsResponse("FACEBOOK", fixture, "x://y");
     expect(post.videoUrl).toBe("https://cdn.fb.com/sd.mp4");
+  });
+});
+
+describe("mapScrapeCreatorsResponse — new platforms", () => {
+  it("maps YouTube details for transcript-first extraction", () => {
+    const post = mapScrapeCreatorsResponse(
+      "YOUTUBE",
+      {
+        id: "abc123",
+        title: "Tomato soup",
+        description: "2 tomatoes and stock",
+        durationMs: 62000,
+        channel: { handle: "@cook" },
+        thumbnails: { high: { url: "https://img.youtube.com/abc.jpg" } },
+      },
+      "https://youtu.be/abc123"
+    );
+    expect(post).toEqual(
+      expect.objectContaining({
+        platform: "YOUTUBE",
+        resolvedUrl: "https://youtube.com/watch?v=abc123",
+        authorHandle: "@cook",
+        durationSec: 62,
+      })
+    );
+  });
+
+  it("maps Pinterest description, image, and outbound recipe link", () => {
+    const post = mapScrapeCreatorsResponse(
+      "PINTEREST",
+      {
+        id: "123",
+        description: "Lemon cake",
+        link: "https://example.com/lemon-cake",
+        image736x: { url: "https://i.pinimg.com/cake.jpg" },
+      },
+      "https://pinterest.com/pin/123"
+    );
+    expect(post.outboundUrls).toEqual(["https://example.com/lemon-cake"]);
+    expect(post.imageUrls).toEqual(["https://i.pinimg.com/cake.jpg"]);
   });
 });

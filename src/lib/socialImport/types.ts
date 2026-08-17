@@ -11,13 +11,22 @@ export interface SocialPost {
   caption: string | null;
   authorHandle: string | null;
   thumbnailUrl: string | null;
+  /** Additional post/carousel images, used only as extraction fallbacks. */
+  imageUrls: string[];
+  /** Creator-provided links that may contain Recipe JSON-LD. */
+  outboundUrls: string[];
   /** Direct downloadable video URL, when the post has a video. */
   videoUrl: string | null;
   durationSec: number | null;
+  language: string | null;
 }
 
 export interface SocialPostFetcher {
-  fetchPost(url: string, platform: SocialPlatform): Promise<SocialPost>;
+  fetchPost(
+    url: string,
+    platform: SocialPlatform,
+    options?: { signal?: AbortSignal }
+  ): Promise<SocialPost>;
 }
 
 export type ImportErrorCode =
@@ -27,16 +36,19 @@ export type ImportErrorCode =
   | "VIDEO_TOO_LONG"
   | "MODERATION_BLOCKED"
   | "TIMEOUT"
+  | "CANCELLED"
   | "INTERNAL";
 
 /** User-displayable message per failure code (also used in the failure push). */
 export const IMPORT_ERROR_MESSAGES: Record<ImportErrorCode, string> = {
   SCRAPE_FAILED: "We couldn't read that post. Please try again later.",
   PRIVATE_POST: "That post appears to be private or unavailable.",
-  NO_RECIPE_FOUND: "We couldn't find a recipe in that post.",
+  NO_RECIPE_FOUND:
+    "We couldn't find a complete recipe in that post. Try sharing recipe screenshots instead.",
   VIDEO_TOO_LONG: "Videos over 10 minutes aren't supported.",
   MODERATION_BLOCKED: "This content can't be imported.",
   TIMEOUT: "The import took too long. Please try again.",
+  CANCELLED: "The import was cancelled.",
   INTERNAL: "Something went wrong importing that post. Please try again.",
 };
 

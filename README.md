@@ -45,3 +45,20 @@ review and incident process.
 
 ### Health Check
 Visit http://localhost:3000/health to verify the API is running.
+
+## Social recipe imports
+
+Social imports are processed by the database-backed worker started with the API.
+The worker is safe to run on multiple long-lived API instances because each job
+is claimed with an expiring lease. Configure:
+
+- `SCRAPECREATORS_API_KEY` for TikTok, Instagram, Facebook, YouTube, and Pinterest metadata.
+- `GEMINI_API_KEY` for video understanding when caption, transcript, linked-site JSON-LD, and carousel-image extraction are insufficient.
+- `SOCIAL_IMPORT_WORKER_CONCURRENCY` to control per-instance work (default `2`, maximum `8`).
+- `SOCIAL_THUMBNAIL_INGESTION_ENABLED=true` only after confirming that storing and redisplaying each platform's thumbnails is authorized. The safe default is no third-party media retention.
+
+Before deploying this API version, apply
+`prisma/migrations/20260817150000_social_import_reliability/migration.sql` through
+the normal production migration workflow. Do not deploy the worker before the
+migration. Import logs are structured JSON with `type: "social_import"` and do
+not include captions, media, tokens, or recipe content.

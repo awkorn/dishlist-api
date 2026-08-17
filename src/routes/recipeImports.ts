@@ -1,203 +1,300 @@
-// Social-media recipe import endpoints. Mounted at /recipes BEFORE the main
-// recipe router (see app.ts) so /recipes/imports/* is matched here rather than
-// swallowed by recipe.ts's GET /:id.
-
 import { Router } from "express";
 import prisma from "../lib/prisma";
-import { authToken, AuthRequest } from "../middleware/auth";
-import {
-  socialImportLimiter,
-  socialImportDailyLimiter,
-} from "../middleware/rateLimit";
-import { processImport } from "../lib/socialImport/processImport";
+import { logSocialImportEvent } from "../lib/socialImport/metrics";
 import {
   canonicalizeSocialUrl,
   detectPlatform,
-  extractFirstUrl,
+  extractPlatformPostId,
+  extractUrls,
 } from "../lib/socialImport/urlUtils";
-import { getImportFailureMessage } from "../lib/socialImport/types";
+import { authToken, type AuthRequest } from "../middleware/auth";
+import {
+  socialImportDailyLimiter,
+  socialImportLimiter,
+} from "../middleware/rateLimit";
 
 const router = Router();
+const DAILY_NEW_IMPORT_LIMIT = 15;
+const TERMINAL = ["COMPLETED", "REVIEW_REQUIRED", "FAILED", "CANCELLED"];
 
-// Rows stuck PENDING/PROCESSING longer than this are presumed lost (server
-// restart mid-pipeline — processing is in-process, not queued) and are
-// surfaced as FAILED/TIMEOUT.
-const STALE_IMPORT_MS = 10 * 60 * 1000;
+function runLimiter(limiter: any, req: any, res: any): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = () => {
+      if (!settled) {
+        settled = true;
+        resolve(false);
+      }
+    };
+    res.once("finish", finish);
+    const next = (error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      res.off("finish", finish);
+      if (error) reject(error);
+      else resolve(true);
+    };
+    try {
+      void Promise.resolve(limiter(req, res, next)).catch(next);
+    } catch (error) {
+      next(error);
+    }
+  });
+}
 
-const importResponse = (record: {
-  id: string;
-  status: string;
-  errorCode: string | null;
-  errorMessage: string | null;
-  recipeId: string | null;
-  sourceUrl: string;
-  platform: string;
-  createdAt: Date;
-  recipe?: { title: string } | null;
-}) => ({
+async function consumeImportQuota(req: AuthRequest, res: any): Promise<boolean> {
+  if (!(await runLimiter(socialImportLimiter, req, res))) return false;
+  return runLimiter(socialImportDailyLimiter, req, res);
+}
+
+const importResponse = (record: any) => ({
   importId: record.id,
   status: record.status,
+  phase: record.phase,
+  attempt: record.attempt,
   errorCode: record.errorCode,
   errorMessage: record.errorMessage,
+  warnings: record.warnings ?? [],
+  confidence: record.confidence,
+  extractionSource: record.extractionSource,
   recipeId: record.recipeId,
   recipeTitle: record.recipe?.title ?? null,
   sourceUrl: record.sourceUrl,
   platform: record.platform,
   createdAt: record.createdAt,
+  updatedAt: record.updatedAt,
+  presentedAt: record.presentedAt,
+  alreadySaved: Boolean(
+    record.recipeId &&
+      (record.status === "COMPLETED" || record.status === "REVIEW_REQUIRED")
+  ),
 });
 
-// Kick off an import from a shared social URL. Responds 202 immediately;
-// extraction runs in-process fire-and-forget and completion is delivered via
-// push notification (+ the GET endpoints below for foreground polling).
+async function findExisting(
+  userId: string,
+  platform: any,
+  canonicalUrl: string,
+  platformPostId: string | null
+) {
+  return prisma.recipeImport.findFirst({
+    where: {
+      userId,
+      OR: [
+        { canonicalUrl },
+        ...(platformPostId ? [{ platform, platformPostId }] : []),
+      ],
+    },
+    include: { recipe: { select: { title: true } } },
+  });
+}
+
 router.post(
   "/import-from-social",
   authToken,
-  socialImportLimiter,
-  socialImportDailyLimiter,
   async (req: AuthRequest, res) => {
     try {
       const userId = req.user!.uid;
-      const rawInput = req.body?.url;
-
-      if (typeof rawInput !== "string" || !rawInput.trim()) {
-        return res.status(400).json({ error: "A URL is required" });
+      if (typeof req.body?.url !== "string" || !req.body.url.trim()) {
+        return res.status(400).json({ error: "A URL is required", code: "MISSING_URL" });
       }
 
-      // Share sheets sometimes hand over text containing the link rather than
-      // a bare URL.
-      const url = extractFirstUrl(rawInput.trim());
+      const url = extractUrls(req.body.url.trim()).find(detectPlatform);
       if (!url) {
-        return res.status(400).json({ error: "No link found in the shared content" });
-      }
-
-      const platform = detectPlatform(url);
-      if (!platform) {
         return res.status(400).json({
-          error: "Only TikTok, Instagram and Facebook links are supported",
+          error: "Share a TikTok, Instagram, Facebook, YouTube, or Pinterest post.",
+          code: "UNSUPPORTED_URL",
         });
       }
-
+      const platform = detectPlatform(url)!;
       const canonicalUrl = canonicalizeSocialUrl(url);
-
-      // Idempotency: one row per (user, canonical URL). Re-shares reuse it.
-      const existing = await prisma.recipeImport.findUnique({
-        where: { userId_canonicalUrl: { userId, canonicalUrl } },
-      });
+      const platformPostId = extractPlatformPostId(url, platform);
+      const existing = await findExisting(
+        userId,
+        platform,
+        canonicalUrl,
+        platformPostId
+      );
 
       if (existing) {
-        if (
-          existing.status === "PENDING" ||
-          existing.status === "PROCESSING"
-        ) {
+        if (existing.status === "PENDING" || existing.status === "PROCESSING") {
           return res.status(202).json(importResponse(existing));
         }
-        if (existing.status === "COMPLETED" && existing.recipeId) {
+        if (
+          (existing.status === "COMPLETED" ||
+            existing.status === "REVIEW_REQUIRED") &&
+          existing.recipeId
+        ) {
           return res.status(200).json(importResponse(existing));
         }
-        // FAILED (or COMPLETED with a since-deleted recipe): retry in place.
+        if (!(await consumeImportQuota(req, res))) return;
         const reset = await prisma.recipeImport.update({
           where: { id: existing.id },
           data: {
             status: "PENDING",
+            phase: "QUEUED",
+            sourceUrl: url,
+            platformPostId,
+            attempt: 0,
+            nextAttemptAt: new Date(),
+            cancelRequestedAt: null,
+            startedAt: null,
+            finishedAt: null,
+            presentedAt: null,
             errorCode: null,
             errorMessage: null,
+            warnings: [],
+            confidence: null,
             recipeId: null,
-            sourceUrl: url,
           },
+          include: { recipe: { select: { title: true } } },
         });
-        processImport(reset.id).catch((error) =>
-          console.error(`Social import ${reset.id} escaped:`, error)
-        );
+        logSocialImportEvent("manually_requeued", { importId: reset.id, platform });
         return res.status(202).json(importResponse(reset));
       }
 
-      const created = await prisma.recipeImport.create({
-        data: { userId, sourceUrl: url, canonicalUrl, platform },
+      if (!(await consumeImportQuota(req, res))) return;
+
+      const recentNewImports = await prisma.recipeImport.count({
+        where: {
+          userId,
+          createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+        },
       });
+      if (recentNewImports >= DAILY_NEW_IMPORT_LIMIT) {
+        return res.status(429).json({
+          error: "Daily import limit reached. Please try again tomorrow.",
+          code: "DAILY_LIMIT",
+          retryAfterSeconds: 24 * 60 * 60,
+        });
+      }
 
-      // Fire-and-forget: processImport handles all its own failure paths; the
-      // catch here is a belt-and-braces guard so a bug can never produce an
-      // unhandled rejection.
-      processImport(created.id).catch((error) =>
-        console.error(`Social import ${created.id} escaped:`, error)
-      );
+      let created;
+      try {
+        created = await prisma.recipeImport.create({
+          data: {
+            userId,
+            sourceUrl: url,
+            canonicalUrl,
+            platformPostId,
+            platform,
+          },
+          include: { recipe: { select: { title: true } } },
+        });
+      } catch (error) {
+        if ((error as { code?: string })?.code !== "P2002") throw error;
+        const raced = await findExisting(
+          userId,
+          platform,
+          canonicalUrl,
+          platformPostId
+        );
+        if (!raced) throw error;
+        return res
+          .status(raced.recipeId ? 200 : 202)
+          .json(importResponse(raced));
+      }
 
+      logSocialImportEvent("accepted", { importId: created.id, platform });
       return res.status(202).json(importResponse(created));
     } catch (error) {
       console.error("Import from social error:", error);
-      res.status(500).json({ error: "Failed to start import" });
+      return res.status(500).json({
+        error: "Failed to start import",
+        code: "INTERNAL",
+      });
     }
   }
 );
 
-// Recent imports for foreground reconciliation (e.g. after sharing while the
-// app was backgrounded and push permission is denied).
 router.get("/imports", authToken, async (req: AuthRequest, res) => {
   try {
-    const userId = req.user!.uid;
     const statusFilter =
       typeof req.query.status === "string"
-        ? req.query.status
-            .split(",")
-            .filter((s) =>
-              ["PENDING", "PROCESSING", "COMPLETED", "FAILED"].includes(s)
-            )
+        ? req.query.status.split(",").filter((status) =>
+            ["PENDING", "PROCESSING", ...TERMINAL].includes(status)
+          )
         : [];
-
     const records = await prisma.recipeImport.findMany({
       where: {
-        userId,
-        createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
-        ...(statusFilter.length > 0
-          ? { status: { in: statusFilter as any } }
-          : {}),
+        userId: req.user!.uid,
+        createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
+        ...(req.query.unpresented === "true" ? { presentedAt: null } : {}),
+        ...(statusFilter.length ? { status: { in: statusFilter as any } } : {}),
       },
       orderBy: { createdAt: "desc" },
-      take: 20,
+      take: 50,
       include: { recipe: { select: { title: true } } },
     });
-
-    res.json({ imports: records.map(importResponse) });
+    return res.json({ imports: records.map(importResponse) });
   } catch (error) {
     console.error("List imports error:", error);
-    res.status(500).json({ error: "Failed to list imports" });
+    return res.status(500).json({ error: "Failed to list imports" });
   }
 });
 
-// Poll a single import's status.
 router.get("/imports/:id", authToken, async (req: AuthRequest, res) => {
-  try {
-    const userId = req.user!.uid;
-    let record = await prisma.recipeImport.findFirst({
-      where: { id: req.params.id, userId },
-      include: { recipe: { select: { title: true } } },
-    });
+  const record = await prisma.recipeImport.findFirst({
+    where: { id: req.params.id, userId: req.user!.uid },
+    include: { recipe: { select: { title: true } } },
+  });
+  if (!record) return res.status(404).json({ error: "Import not found" });
+  return res.json(importResponse(record));
+});
 
-    if (!record) {
-      return res.status(404).json({ error: "Import not found" });
-    }
+router.patch("/imports/:id/presented", authToken, async (req: AuthRequest, res) => {
+  const updated = await prisma.recipeImport.updateMany({
+    where: { id: req.params.id, userId: req.user!.uid, status: { in: TERMINAL as any } },
+    data: { presentedAt: new Date() },
+  });
+  if (updated.count === 0) return res.status(404).json({ error: "Terminal import not found" });
+  return res.status(204).send();
+});
 
-    // Staleness backstop for work lost to a restart.
-    if (
-      (record.status === "PENDING" || record.status === "PROCESSING") &&
-      Date.now() - record.updatedAt.getTime() > STALE_IMPORT_MS
-    ) {
-      record = await prisma.recipeImport.update({
-        where: { id: record.id },
-        data: {
-          status: "FAILED",
-          errorCode: "TIMEOUT",
-          errorMessage: getImportFailureMessage("TIMEOUT"),
-        },
-        include: { recipe: { select: { title: true } } },
-      });
-    }
-
-    res.json(importResponse(record));
-  } catch (error) {
-    console.error("Get import status error:", error);
-    res.status(500).json({ error: "Failed to fetch import status" });
+router.post("/imports/:id/retry", authToken, socialImportLimiter, socialImportDailyLimiter, async (req: AuthRequest, res) => {
+  const existing = await prisma.recipeImport.findFirst({
+    where: { id: req.params.id, userId: req.user!.uid },
+  });
+  if (!existing) return res.status(404).json({ error: "Import not found" });
+  if (existing.status !== "FAILED" && existing.status !== "CANCELLED") {
+    return res.status(409).json({ error: "Only failed or cancelled imports can be retried" });
   }
+  const record = await prisma.recipeImport.update({
+    where: { id: existing.id },
+    data: {
+      status: "PENDING",
+      phase: "QUEUED",
+      attempt: 0,
+      nextAttemptAt: new Date(),
+      cancelRequestedAt: null,
+      finishedAt: null,
+      presentedAt: null,
+      errorCode: null,
+      errorMessage: null,
+    },
+    include: { recipe: { select: { title: true } } },
+  });
+  return res.status(202).json(importResponse(record));
+});
+
+router.post("/imports/:id/cancel", authToken, async (req: AuthRequest, res) => {
+  const existing = await prisma.recipeImport.findFirst({
+    where: { id: req.params.id, userId: req.user!.uid },
+  });
+  if (!existing) return res.status(404).json({ error: "Import not found" });
+  if (existing.status === "PENDING") {
+    await prisma.recipeImport.update({
+      where: { id: existing.id },
+      data: { status: "CANCELLED", phase: "CANCELLED", finishedAt: new Date() },
+    });
+  } else if (existing.status === "PROCESSING") {
+    await prisma.recipeImport.update({
+      where: { id: existing.id },
+      data: { cancelRequestedAt: new Date(), phase: "CANCELLING" },
+    });
+  } else {
+    return res.status(409).json({ error: "Import is already finished" });
+  }
+  return res.status(202).json({ importId: existing.id, status: "CANCELLED" });
 });
 
 export default router;

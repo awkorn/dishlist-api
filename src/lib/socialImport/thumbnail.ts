@@ -7,19 +7,27 @@ import crypto from "crypto";
 import { supabaseAdmin } from "../supabase";
 import { moderateImage } from "../moderation";
 import { normalizeUploadedImage } from "../uploadedImages";
+import { safeRemoteFetch, withTimeoutSignal } from "./safeRemoteFetch";
 
 const FETCH_TIMEOUT_MS = 10_000;
 const MAX_THUMBNAIL_BYTES = 8 * 1024 * 1024;
 
 export async function ingestThumbnail(
   userId: string,
-  thumbnailUrl: string | null
+  thumbnailUrl: string | null,
+  options?: { signal?: AbortSignal }
 ): Promise<string | null> {
-  if (!thumbnailUrl) return null;
+  // Third-party media storage is disabled unless product/legal has explicitly
+  // confirmed the platform terms and configured the deployment accordingly.
+  if (!thumbnailUrl || process.env.SOCIAL_THUMBNAIL_INGESTION_ENABLED !== "true") {
+    return null;
+  }
 
   try {
-    const response = await fetch(thumbnailUrl, {
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    const response = await safeRemoteFetch(thumbnailUrl, {
+      signal: withTimeoutSignal(options?.signal, FETCH_TIMEOUT_MS),
+      maxBytes: MAX_THUMBNAIL_BYTES,
+      allowedMimePrefixes: ["image/"],
     });
     if (!response.ok) {
       console.warn(`Thumbnail fetch returned ${response.status}`);

@@ -993,11 +993,36 @@ router.delete(
           .json({ error: "Access denied or DishList not found" });
       }
 
-      // Remove the recipe from this dishlist
+      // The recipe detail may still be showing the original recipe after the
+      // user saved their fork. Accept that original ID and remove either the
+      // direct attachment or the current user's saved fork from this DishList.
+      const recipe = await prisma.recipe.findFirst({
+        where: accessibleRecipeWhere(userId, recipeId),
+        select: { id: true, creatorId: true },
+      });
+
+      if (!recipe) {
+        return res.status(404).json({ error: "Recipe not found" });
+      }
+
+      const relevantRecipeIds = [recipe.id];
+      if (recipe.creatorId !== userId) {
+        const fork = await prisma.recipe.findUnique({
+          where: {
+            creatorId_originalRecipeId: {
+              creatorId: userId,
+              originalRecipeId: recipe.id,
+            },
+          },
+          select: { id: true },
+        });
+        if (fork) relevantRecipeIds.push(fork.id);
+      }
+
       await prisma.dishListRecipe.deleteMany({
         where: {
           dishListId,
-          recipeId,
+          recipeId: { in: relevantRecipeIds },
         },
       });
 
