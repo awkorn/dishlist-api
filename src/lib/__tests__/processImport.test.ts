@@ -102,7 +102,7 @@ beforeEach(() => {
 });
 
 describe("processImport durable pipeline", () => {
-  it("commits recipe and COMPLETED status in the same transaction", async () => {
+  it("commits recipe and COMPLETED status and records it in notifications", async () => {
     (extractRecipeFromCaption as any).mockResolvedValue({
       sufficient: true,
       recipe: completeRecipe,
@@ -130,7 +130,15 @@ describe("processImport durable pipeline", () => {
         data: expect.objectContaining({ status: "COMPLETED", recipeId: "rec_1" }),
       })
     );
-    expect(mockPrisma.notification.create).not.toHaveBeenCalled();
+    expect(mockPrisma.notification.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          type: "RECIPE_IMPORT_COMPLETED",
+          title: "Recipe imported",
+          message: "“Garlic Noodles” was added to My Recipes.",
+        }),
+      })
+    );
   });
 
   it("falls back to video when caption extraction is insufficient", async () => {

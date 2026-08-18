@@ -318,19 +318,25 @@ async function runPipeline(
     needsReview: quality.needsReview,
   });
 
-  if (quality.needsReview) {
-    await prisma.notification
-      .create({
-        data: {
-          type: "RECIPE_IMPORT_COMPLETED",
-          title: "Review imported recipe",
-          message: `“${savedRecipe.title}” was added with details to review.`,
-          receiverId: userId,
-          data: JSON.stringify({ recipeId: savedRecipe.id, importId, warnings: quality.warnings }),
-        },
-      })
-      .catch((error) => console.error(`Review notification ${importId} failed:`, error));
-  }
+  await prisma.notification
+    .create({
+      data: {
+        type: "RECIPE_IMPORT_COMPLETED",
+        title: quality.needsReview ? "Review imported recipe" : "Recipe imported",
+        message: quality.needsReview
+          ? `“${savedRecipe.title}” was added with details to review.`
+          : `“${savedRecipe.title}” was added to My Recipes.`,
+        receiverId: userId,
+        data: JSON.stringify({
+          recipeId: savedRecipe.id,
+          importId,
+          warnings: quality.warnings,
+        }),
+      },
+    })
+    .catch((error) =>
+      console.error(`Import notification ${importId} failed:`, error)
+    );
 
   return title;
 }
