@@ -55,7 +55,9 @@ is claimed with an expiring lease. Configure:
 - `SCRAPECREATORS_API_KEY` for TikTok, Instagram, Facebook, YouTube, and Pinterest metadata.
 - `GEMINI_API_KEY` for video understanding when caption, transcript, linked-site JSON-LD, and carousel-image extraction are insufficient.
 - `SOCIAL_IMPORT_WORKER_CONCURRENCY` to control per-instance work (default `2`, maximum `8`).
-- `SOCIAL_THUMBNAIL_INGESTION_ENABLED=true` only after confirming that storing and redisplaying each platform's thumbnails is authorized. The safe default is no third-party media retention.
+
+Post thumbnails are fetched with URL and size safeguards, normalized, moderated,
+and copied to the recipes storage bucket so imported recipe images remain stable.
 
 Before deploying this API version, apply
 `prisma/migrations/20260817150000_social_import_reliability/migration.sql` through

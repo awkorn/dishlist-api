@@ -141,6 +141,40 @@ describe("processImport durable pipeline", () => {
     );
   });
 
+  it("stores the ingested social thumbnail on the imported recipe", async () => {
+    (extractRecipeFromCaption as any).mockResolvedValue({
+      sufficient: true,
+      recipe: completeRecipe,
+      multipleRecipesDetected: false,
+      language: "en",
+    });
+    (ingestThumbnail as any).mockResolvedValue(
+      "https://storage.example.com/recipes/user_1/social/thumbnail.jpg"
+    );
+
+    await processImport("imp_1", {
+      leaseToken: "lease",
+      fetcher: fetcherReturning(post),
+    });
+
+    expect(ingestThumbnail).toHaveBeenCalledWith(
+      "user_1",
+      post.thumbnailUrl,
+      { signal: expect.any(AbortSignal) }
+    );
+    expect(mockPrisma.__tx.recipe.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          imageUrl:
+            "https://storage.example.com/recipes/user_1/social/thumbnail.jpg",
+          imageUrls: [
+            "https://storage.example.com/recipes/user_1/social/thumbnail.jpg",
+          ],
+        }),
+      })
+    );
+  });
+
   it("falls back to video when caption extraction is insufficient", async () => {
     (extractRecipeFromCaption as any).mockResolvedValue({ sufficient: false });
     (extractRecipeFromVideo as any).mockResolvedValue(completeRecipe);

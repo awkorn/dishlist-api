@@ -17,11 +17,7 @@ export async function ingestThumbnail(
   thumbnailUrl: string | null,
   options?: { signal?: AbortSignal }
 ): Promise<string | null> {
-  // Third-party media storage is disabled unless product/legal has explicitly
-  // confirmed the platform terms and configured the deployment accordingly.
-  if (!thumbnailUrl || process.env.SOCIAL_THUMBNAIL_INGESTION_ENABLED !== "true") {
-    return null;
-  }
+  if (!thumbnailUrl) return null;
 
   try {
     const response = await safeRemoteFetch(thumbnailUrl, {
