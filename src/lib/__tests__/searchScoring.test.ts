@@ -281,7 +281,13 @@ describe("scoreDishList", () => {
     title: "Weeknight Dinners",
     visibility: "PUBLIC",
     ownerId: "o1",
-    owner: { uid: "o1", username: "owner", firstName: "O", lastName: "W" },
+    owner: {
+      uid: "o1",
+      username: "owner",
+      firstName: "O",
+      lastName: "W",
+      avatarUrl: "https://example.com/avatar.jpg",
+    },
     collaborators: [],
     recipes: [],
     _count: { recipes: 3, followers: 9 },
@@ -302,6 +308,7 @@ describe("scoreDishList", () => {
     expect(result.score).toBeCloseTo(123, 5);
     expect(result.recipeCount).toBe(3);
     expect(result.followerCount).toBe(9);
+    expect(result.owner.avatarUrl).toBe("https://example.com/avatar.jpg");
   });
 
   it("reports collaborator membership", () => {

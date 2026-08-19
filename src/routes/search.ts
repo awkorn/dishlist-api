@@ -536,6 +536,7 @@ async function searchDishLists(
           username: true,
           firstName: true,
           lastName: true,
+          avatarUrl: true,
         },
       },
       collaborators: {
